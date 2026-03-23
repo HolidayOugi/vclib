@@ -33,3 +33,6 @@ vclib_add_test(
     VCLIB_MODULE external
     SOURCES ${SOURCES}
     ${HEADER_ONLY_OPTION})
+
+set(TARGET_NAME vclib-external-test-${TEST_NAME})
+target_link_libraries(${TARGET_NAME} PRIVATE vclib::render)
