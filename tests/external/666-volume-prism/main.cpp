@@ -28,6 +28,7 @@
 #include <vclib/render/drawable/drawable_mesh.h>
 
 #include <QApplication>
+#include <array>
 #include <cmath>
 #include <limits>
 #include <iostream>
@@ -54,20 +55,21 @@ int main(int argc, char** argv)
 
     // Runtime/configuration knobs for search, debug geometry and visualization.
     constexpr bool   VISUAL             = true;
-    constexpr double EPS                = 1e-9;
-    constexpr uint   VIEW_SAMPLE_STRIDE = 10;
-    constexpr uint   NUM_PLANES         = 100;
+    constexpr uint   VIEW_SAMPLE_STRIDE = 0;
+    constexpr uint   NUM_PLANES         = 200;
     constexpr bool   VERBOSE_TRIANGLES  = false;
 
-    PolyMesh m = loadMesh<PolyMesh>(VCLIB_EXAMPLE_MESHES_PATH "/greek_helmet.obj");
+    PolyMesh m = loadMesh<PolyMesh>(VCLIB_EXAMPLE_MESHES_PATH "/brain.ply");
     embree::Scene scene(m);
 
     updateBoundingBox(m);
 
+    const double EPS = 1e-6 * m.boundingBox().diagonal();
+
     EdgeMesh bestRaysMesh;
-    EdgeMesh bestPrismsMesh;
+    TriMesh  bestPrismsMesh;
     EdgeMesh bestRaysMeshView;
-    EdgeMesh bestPrismsMeshView;
+    TriMesh  bestPrismsMeshView;
     TriMesh  bestPlaneMesh;
 
     auto addSegment = [](EdgeMesh& em, const Point3d& a, const Point3d& b) {
@@ -76,13 +78,49 @@ int main(int argc, char** argv)
         em.addEdge(va, vb);
     };
 
+    auto addRegularPrism = [&](TriMesh&         tm,
+                               const Point3d&   p0,
+                               const Point3d&   p1,
+                               const Point3d&   p2,
+                               const Point3d&   n,
+                               double           projectionOffset,
+                               double           height) {
+        const Planed projPlane(n * projectionOffset, n);
+        Point3d      b0 = projPlane.projectPoint(p0);
+        Point3d      b1 = projPlane.projectPoint(p1);
+        Point3d      b2 = projPlane.projectPoint(p2);
+
+        const Point3d offsetVec = n * height;
+        const Point3d t0        = b0 + offsetVec;
+        const Point3d t1        = b1 + offsetVec;
+        const Point3d t2        = b2 + offsetVec;
+
+        const std::array<Point3d, 6> prismVerts = {b0, b1, b2, t0, t1, t2};
+        std::array<uint, 6>          prismIds;
+        for (uint i = 0; i < prismVerts.size(); ++i) {
+            prismIds[i] = tm.addVertex(prismVerts[i]);
+        }
+
+        tm.addFace(prismIds[3], prismIds[5], prismIds[4]); // t0, t2, t1
+        tm.addFace(prismIds[0], prismIds[1], prismIds[2]); // b0, b1, b2
+
+        tm.addFace(prismIds[0], prismIds[4], prismIds[1]); // b0, t1, b1
+        tm.addFace(prismIds[0], prismIds[3], prismIds[4]); // b0, t0, t1
+
+        tm.addFace(prismIds[1], prismIds[5], prismIds[2]); // b1, t2, b2
+        tm.addFace(prismIds[1], prismIds[4], prismIds[5]); // b1, t1, t2
+
+        tm.addFace(prismIds[2], prismIds[3], prismIds[0]); // b2, t0, b0
+        tm.addFace(prismIds[2], prismIds[5], prismIds[3]); // b2, t2, t0
+    };
+
     // Evaluate one candidate plane orientation and return the accumulated volume.
     auto evaluatePlane = [&](const Point3d& rawPlaneNormal,
                              bool           collectDebug,
                              EdgeMesh*      raysMesh,
-                             EdgeMesh*      prismsMesh,
+                             TriMesh*       prismsMesh,
                              EdgeMesh*      raysMeshView,
-                             EdgeMesh*      prismsMeshView,
+                             TriMesh*       prismsMeshView,
                              uint&          outTriCount) -> double {
         Point3d planeNormal = rawPlaneNormal;
         if (planeNormal.norm() <= EPS) {
@@ -182,6 +220,10 @@ int main(int argc, char** argv)
                     targetPoint = rayOrigin + rayDirection * t;
                 }
 
+                if ((targetPoint - triCentroid).norm() <= EPS) {
+                    continue;
+                }
+
                 // Prism contribution for this triangle.
                 const double height = (targetPoint - triCentroid).norm();
                 const double volume = area * -dot * height;
@@ -191,36 +233,21 @@ int main(int argc, char** argv)
                     prismsMeshView) {
                     addSegment(*raysMesh, triCentroid, targetPoint);
 
-                    Point3d b0 = p0 + rayDirection * height;
-                    Point3d b1 = p1 + rayDirection * height;
-                    Point3d b2 = p2 + rayDirection * height;
+                    const double projectionOffset =
+                        hitMesh ? planeNormal.dot(targetPoint) : plane.offset();
+                    addRegularPrism(
+                        *prismsMesh, p0, p1, p2, planeNormal, projectionOffset, height);
 
-                    addSegment(*prismsMesh, p0, p1);
-                    addSegment(*prismsMesh, p1, p2);
-                    addSegment(*prismsMesh, p2, p0);
-
-                    addSegment(*prismsMesh, b0, b1);
-                    addSegment(*prismsMesh, b1, b2);
-                    addSegment(*prismsMesh, b2, b0);
-
-                    addSegment(*prismsMesh, p0, b0);
-                    addSegment(*prismsMesh, p1, b1);
-                    addSegment(*prismsMesh, p2, b2);
-
-                    if (localTriId % VIEW_SAMPLE_STRIDE == 0) {
+                    if (VIEW_SAMPLE_STRIDE == 0 || localTriId % VIEW_SAMPLE_STRIDE == 0) {
                         addSegment(*raysMeshView, triCentroid, targetPoint);
-
-                        addSegment(*prismsMeshView, p0, p1);
-                        addSegment(*prismsMeshView, p1, p2);
-                        addSegment(*prismsMeshView, p2, p0);
-
-                        addSegment(*prismsMeshView, b0, b1);
-                        addSegment(*prismsMeshView, b1, b2);
-                        addSegment(*prismsMeshView, b2, b0);
-
-                        addSegment(*prismsMeshView, p0, b0);
-                        addSegment(*prismsMeshView, p1, b1);
-                        addSegment(*prismsMeshView, p2, b2);
+                        addRegularPrism(
+                            *prismsMeshView,
+                            p0,
+                            p1,
+                            p2,
+                            planeNormal,
+                            projectionOffset,
+                            height);
                     }
 
                     if (VERBOSE_TRIANGLES) {
@@ -349,9 +376,9 @@ int main(int argc, char** argv)
         drawableRays.name() = "debug_rays";
         drawableRays.updateBuffers({VERTICES, EDGES});
 
-        DrawableMesh<EdgeMesh> drawablePrisms(std::move(bestPrismsMeshView));
+        DrawableMesh<TriMesh> drawablePrisms(std::move(bestPrismsMeshView));
         drawablePrisms.name() = "debug_prisms";
-        drawablePrisms.updateBuffers({VERTICES, EDGES});
+        drawablePrisms.updateBuffers();
 
         auto vec = std::make_shared<DrawableObjectVector>();
         vec->pushBack(std::move(drawableInput));
