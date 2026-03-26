@@ -29,23 +29,12 @@
 
 #include <QApplication>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <limits>
 #include <iostream>
 #include <tuple>
-
-class MeshViewerSelectQt : public vcl::qt::MeshViewer
-{
-public:
-    using vcl::qt::MeshViewer::MeshViewer;
-
-    MeshViewerSelectQt(QWidget* parent = nullptr) : vcl::qt::MeshViewer(parent)
-    {
-        viewer().setOnObjectSelected([this](uint id) {
-            drawableObjectVectorTree().setSelectedItem(id);
-        });
-    }
-};
+#include <vector>
 
 int main(int argc, char** argv)
 {
@@ -54,9 +43,8 @@ int main(int argc, char** argv)
     QApplication app(argc, argv);
 
     // Runtime/configuration knobs for search, debug geometry and visualization.
-    constexpr bool   VISUAL             = true;
-    constexpr uint   VIEW_SAMPLE_STRIDE = 0;
-    constexpr uint   NUM_PLANES         = 200;
+    constexpr bool   VISUAL             = false;
+    constexpr uint   NUM_PLANES         = 10000;
     constexpr bool   VERBOSE_TRIANGLES  = false;
 
     PolyMesh m = loadMesh<PolyMesh>(VCLIB_EXAMPLE_MESHES_PATH "/brain.ply");
@@ -68,8 +56,6 @@ int main(int argc, char** argv)
 
     EdgeMesh bestRaysMesh;
     TriMesh  bestPrismsMesh;
-    EdgeMesh bestRaysMeshView;
-    TriMesh  bestPrismsMeshView;
     TriMesh  bestPlaneMesh;
 
     auto addSegment = [](EdgeMesh& em, const Point3d& a, const Point3d& b) {
@@ -114,13 +100,60 @@ int main(int argc, char** argv)
         tm.addFace(prismIds[2], prismIds[5], prismIds[3]); // b2, t2, t0
     };
 
+    struct SourceTriangle
+    {
+        uint    sourceFaceId;
+        Point3d p0;
+        Point3d p1;
+        Point3d p2;
+        Point3d centroid;
+        Point3d normalUnit;
+        double  area;
+    };
+
+    std::vector<std::vector<uint>> faceTriangulations;
+
+    std::vector<SourceTriangle> sourceTriangles;
+
+    for (const auto& face : m.faces()) {
+        const uint faceId = face.index();
+        if (faceId >= faceTriangulations.size()) {
+            faceTriangulations.resize(faceId + 1);
+        }
+
+        auto& triangulation = faceTriangulations[faceId];
+        triangulation       = earCut(face);
+
+        if (triangulation.size() < 3) {
+            continue;
+        }
+
+        for (uint i = 0; i + 2 < triangulation.size(); i += 3) {
+            const Point3d& p0 = face.vertex(triangulation[i + 0])->position();
+            const Point3d& p1 = face.vertex(triangulation[i + 1])->position();
+            const Point3d& p2 = face.vertex(triangulation[i + 2])->position();
+
+            const double area = Triangle<Point3d>::area(p0, p1, p2);
+            if (area <= EPS) {
+                continue;
+            }
+
+            Point3d triNormalUnit = Triangle<Point3d>::normal(p0, p1, p2);
+            if (triNormalUnit.norm() <= EPS) {
+                continue;
+            }
+            triNormalUnit.normalize();
+
+            sourceTriangles.push_back(
+                {faceId, p0, p1, p2, (p0 + p1 + p2) / 3.0, triNormalUnit, area});
+        }
+    }
+
     // Evaluate one candidate plane orientation and return the accumulated volume.
     auto evaluatePlane = [&](const Point3d& rawPlaneNormal,
                              bool           collectDebug,
                              EdgeMesh*      raysMesh,
                              TriMesh*       prismsMesh,
-                             EdgeMesh*      raysMeshView,
-                             TriMesh*       prismsMeshView,
                              uint&          outTriCount) -> double {
         Point3d planeNormal = rawPlaneNormal;
         if (planeNormal.norm() <= EPS) {
@@ -141,127 +174,279 @@ int main(int argc, char** argv)
         uint   localTriId  = 0;
         double localVolume = 0.0;
 
-        for (const auto& face : m.faces()) {
-            std::vector<uint> triangulation = earCut(face);
-            if (triangulation.size() < 3) {
+#ifdef VCL_EMBREE_FORCE_CHUNK_16
+        struct RayCandidate
+        {
+            uint    sourceFaceId;
+            Point3d p0;
+            Point3d p1;
+            Point3d p2;
+            Point3d triCentroid;
+            Point3d rayDirection;
+            Point3d rayOrigin;
+            double  area;
+            double  dot;
+        };
+
+        std::vector<RayCandidate> candidates;
+        std::vector<Point3d>      rayOrigins;
+        std::vector<Point3d>      rayDirections;
+        candidates.reserve(sourceTriangles.size());
+        rayOrigins.reserve(sourceTriangles.size());
+        rayDirections.reserve(sourceTriangles.size());
+
+        for (const auto& tri : sourceTriangles) {
+            const double dot = tri.normalUnit.dot(planeNormal);
+            // Keep only triangles with opposite orientation w.r.t. plane normal.
+            if (dot >= 0.0) {
                 continue;
             }
 
-            for (uint i = 0; i + 2 < triangulation.size(); i += 3) {
-                const Point3d& p0 = face.vertex(triangulation[i + 0])->position();
-                const Point3d& p1 = face.vertex(triangulation[i + 1])->position();
-                const Point3d& p2 = face.vertex(triangulation[i + 2])->position();
+            const Point3d rayDirection = -planeNormal;
+            const Point3d rayOrigin    = tri.centroid + rayDirection * EPS;
 
-                const double area = Triangle<Point3d>::area(p0, p1, p2);
-                if (area <= EPS) {
-                    continue;
-                }
+            candidates.push_back(
+                {tri.sourceFaceId,
+                 tri.p0,
+                 tri.p1,
+                 tri.p2,
+                 tri.centroid,
+                 rayDirection,
+                 rayOrigin,
+                 tri.area,
+                 dot});
+            rayOrigins.push_back(rayOrigin);
+            rayDirections.push_back(rayDirection);
+        }
 
-                Point3d triNormalUnit = Triangle<Point3d>::normal(p0, p1, p2);
-                if (triNormalUnit.norm() <= EPS) {
-                    continue;
-                }
-                triNormalUnit.normalize();
+        std::vector<embree::Scene::HitResult> hits =
+            scene.firstFaceIntersectedByRays(rayOrigins, rayDirections, EPS);
 
-                const double dot = triNormalUnit.dot(planeNormal);
-                // Keep only triangles with opposite orientation w.r.t. plane normal.
-                if (dot >= 0.0) {
-                    continue;
-                }
+        std::vector<std::size_t> retryMap;
+        std::vector<Point3d>     retryOrigins;
+        std::vector<Point3d>     retryDirections;
 
-                const Point3d triCentroid  = (p0 + p1 + p2) / 3.0;
-                const Point3d rayDirection = -planeNormal;
-                Point3d       rayOrigin    = triCentroid + rayDirection * EPS;
-
-                auto [hitFaceId, barCoords, hitTriId] =
-                    scene.firstFaceIntersectedByRay(rayOrigin, rayDirection, EPS);
-
-                if (hitFaceId == face.index()) {
-                    rayOrigin = triCentroid + rayDirection * (100.0 * EPS);
-                    std::tie(hitFaceId, barCoords, hitTriId) =
-                        scene.firstFaceIntersectedByRay(rayOrigin, rayDirection, EPS);
-                }
-
-                Point3d targetPoint;
-                bool    hitMesh = hitFaceId != UINT_NULL;
-
-                if (hitMesh) {
-                    const auto& hitFace = m.face(hitFaceId);
-                    auto        hitTris = earCut(hitFace);
-                    const uint  base    = hitTriId * 3;
-
-                    if (base + 2 < hitTris.size()) {
-                        const Point3d& q0 =
-                            hitFace.vertex(hitTris[base + 0])->position();
-                        const Point3d& q1 =
-                            hitFace.vertex(hitTris[base + 1])->position();
-                        const Point3d& q2 =
-                            hitFace.vertex(hitTris[base + 2])->position();
-
-                        targetPoint =
-                            q0 * barCoords.x() + q1 * barCoords.y() + q2 * barCoords.z();
-                    }
-                    else {
-                        hitMesh = false;
-                    }
-                }
-
-                if (!hitMesh) {
-                    const double denom = planeNormal.dot(rayDirection);
-                    if (std::abs(denom) <= EPS) {
-                        continue;
-                    }
-
-                    const double t =
-                        (plane.offset() - planeNormal.dot(rayOrigin)) / denom;
-                    if (t < 0.0) {
-                        continue;
-                    }
-                    targetPoint = rayOrigin + rayDirection * t;
-                }
-
-                if ((targetPoint - triCentroid).norm() <= EPS) {
-                    continue;
-                }
-
-                // Prism contribution for this triangle.
-                const double height = (targetPoint - triCentroid).norm();
-                const double volume = area * -dot * height;
-                localVolume += volume;
-
-                if (collectDebug && raysMesh && prismsMesh && raysMeshView &&
-                    prismsMeshView) {
-                    addSegment(*raysMesh, triCentroid, targetPoint);
-
-                    const double projectionOffset =
-                        hitMesh ? planeNormal.dot(targetPoint) : plane.offset();
-                    addRegularPrism(
-                        *prismsMesh, p0, p1, p2, planeNormal, projectionOffset, height);
-
-                    if (VIEW_SAMPLE_STRIDE == 0 || localTriId % VIEW_SAMPLE_STRIDE == 0) {
-                        addSegment(*raysMeshView, triCentroid, targetPoint);
-                        addRegularPrism(
-                            *prismsMeshView,
-                            p0,
-                            p1,
-                            p2,
-                            planeNormal,
-                            projectionOffset,
-                            height);
-                    }
-
-                    if (VERBOSE_TRIANGLES) {
-                        std::cout << "  Ray result: "
-                                  << (hitMesh ? "hit mesh" : "hit plane")
-                                  << ", area = " << area << ", dot = " << dot
-                                  << ", height = " << height << ", V = "
-                                  << volume << "\n";
-                    }
-                }
-
-                ++localTriId;
+        for (std::size_t i = 0; i < candidates.size(); ++i) {
+            auto [hitFaceId, barCoords, hitTriId] = hits[i];
+            if (hitFaceId == candidates[i].sourceFaceId) {
+                retryMap.push_back(i);
+                retryOrigins.push_back(
+                    candidates[i].triCentroid +
+                    candidates[i].rayDirection * (100.0 * EPS));
+                retryDirections.push_back(candidates[i].rayDirection);
             }
         }
+
+        if (!retryMap.empty()) {
+            std::vector<embree::Scene::HitResult> retryHits =
+                scene.firstFaceIntersectedByRays(
+                    retryOrigins, retryDirections, EPS);
+
+            for (std::size_t i = 0; i < retryMap.size(); ++i) {
+                const std::size_t idx = retryMap[i];
+                hits[idx]             = retryHits[i];
+                candidates[idx].rayOrigin = retryOrigins[i];
+            }
+        }
+
+        for (std::size_t i = 0; i < candidates.size(); ++i) {
+            const auto& c = candidates[i];
+            auto [hitFaceId, barCoords, hitTriId] = hits[i];
+
+            Point3d targetPoint;
+            bool    hitMesh = hitFaceId != UINT_NULL;
+
+            if (hitMesh && hitFaceId < faceTriangulations.size()) {
+                const auto& hitFace = m.face(hitFaceId);
+                const auto& hitTris = faceTriangulations[hitFaceId];
+                const uint  base    = hitTriId * 3;
+
+                if (base + 2 < hitTris.size()) {
+                    const Point3d& q0 =
+                        hitFace.vertex(hitTris[base + 0])->position();
+                    const Point3d& q1 =
+                        hitFace.vertex(hitTris[base + 1])->position();
+                    const Point3d& q2 =
+                        hitFace.vertex(hitTris[base + 2])->position();
+
+                    Point3d hitTriNormal = Triangle<Point3d>::normal(q0, q1, q2);
+                    if (hitTriNormal.norm() <= EPS) {
+                        continue;
+                    }
+                    hitTriNormal.normalize();
+
+                    // Discard rays hitting triangles whose normal points
+                    // along the ray direction.
+                    if (hitTriNormal.dot(c.rayDirection) > 0.0) {
+                        continue;
+                    }
+
+                    targetPoint =
+                        q0 * barCoords.x() + q1 * barCoords.y() + q2 * barCoords.z();
+                }
+                else {
+                    hitMesh = false;
+                }
+            }
+            else {
+                hitMesh = false;
+            }
+
+            if (!hitMesh) {
+                const double denom = planeNormal.dot(c.rayDirection);
+                if (std::abs(denom) <= EPS) {
+                    continue;
+                }
+
+                const double t =
+                    (plane.offset() - planeNormal.dot(c.rayOrigin)) / denom;
+                if (t < 0.0) {
+                    continue;
+                }
+                targetPoint = c.rayOrigin + c.rayDirection * t;
+            }
+
+            if ((targetPoint - c.triCentroid).norm() <= EPS) {
+                continue;
+            }
+
+            // Prism contribution for this triangle.
+            const double height = (targetPoint - c.triCentroid).norm();
+            const double volume = c.area * -c.dot * height;
+            localVolume += volume;
+
+            if (collectDebug && raysMesh && prismsMesh) {
+                addSegment(*raysMesh, c.triCentroid, targetPoint);
+
+                const double projectionOffset =
+                    hitMesh ? planeNormal.dot(targetPoint) : plane.offset();
+                addRegularPrism(*prismsMesh,
+                                c.p0,
+                                c.p1,
+                                c.p2,
+                                planeNormal,
+                                projectionOffset,
+                                height);
+
+                if (VERBOSE_TRIANGLES) {
+                    std::cout << "  Ray result: "
+                              << (hitMesh ? "hit mesh" : "hit plane")
+                              << ", area = " << c.area << ", dot = " << c.dot
+                              << ", height = " << height << ", V = "
+                              << volume << "\n";
+                }
+            }
+
+            ++localTriId;
+        }
+#else
+        for (const auto& tri : sourceTriangles) {
+            const double dot = tri.normalUnit.dot(planeNormal);
+            // Keep only triangles with opposite orientation w.r.t. plane normal.
+            if (dot >= 0.0) {
+                continue;
+            }
+
+            const Point3d rayDirection = -planeNormal;
+            Point3d       rayOrigin    = tri.centroid + rayDirection * EPS;
+
+            auto [hitFaceId, barCoords, hitTriId] =
+                scene.firstFaceIntersectedByRay(rayOrigin, rayDirection, EPS);
+
+            if (hitFaceId == tri.sourceFaceId) {
+                rayOrigin = tri.centroid + rayDirection * (100.0 * EPS);
+                std::tie(hitFaceId, barCoords, hitTriId) =
+                    scene.firstFaceIntersectedByRay(rayOrigin, rayDirection, EPS);
+            }
+
+            Point3d targetPoint;
+            bool    hitMesh = hitFaceId != UINT_NULL;
+
+            if (hitMesh && hitFaceId < faceTriangulations.size()) {
+                const auto& hitFace = m.face(hitFaceId);
+                const auto& hitTris = faceTriangulations[hitFaceId];
+                const uint  base    = hitTriId * 3;
+
+                if (base + 2 < hitTris.size()) {
+                    const Point3d& q0 =
+                        hitFace.vertex(hitTris[base + 0])->position();
+                    const Point3d& q1 =
+                        hitFace.vertex(hitTris[base + 1])->position();
+                    const Point3d& q2 =
+                        hitFace.vertex(hitTris[base + 2])->position();
+
+                    Point3d hitTriNormal = Triangle<Point3d>::normal(q0, q1, q2);
+                    if (hitTriNormal.norm() <= EPS) {
+                        continue;
+                    }
+                    hitTriNormal.normalize();
+
+                    // Discard rays hitting triangles whose normal points
+                    // along the ray direction.
+                    if (hitTriNormal.dot(rayDirection) > EPS) {
+                        continue;
+                    }
+
+                    targetPoint =
+                        q0 * barCoords.x() + q1 * barCoords.y() + q2 * barCoords.z();
+                }
+                else {
+                    hitMesh = false;
+                }
+            }
+            else {
+                hitMesh = false;
+            }
+
+            if (!hitMesh) {
+                const double denom = planeNormal.dot(rayDirection);
+                if (std::abs(denom) <= EPS) {
+                    continue;
+                }
+
+                const double t =
+                    (plane.offset() - planeNormal.dot(rayOrigin)) / denom;
+                if (t < 0.0) {
+                    continue;
+                }
+                targetPoint = rayOrigin + rayDirection * t;
+            }
+
+            if ((targetPoint - tri.centroid).norm() <= EPS) {
+                continue;
+            }
+
+            // Prism contribution for this triangle.
+            const double height = (targetPoint - tri.centroid).norm();
+            const double volume = tri.area * -dot * height;
+            localVolume += volume;
+
+            if (collectDebug && raysMesh && prismsMesh) {
+                addSegment(*raysMesh, tri.centroid, targetPoint);
+
+                const double projectionOffset =
+                    hitMesh ? planeNormal.dot(targetPoint) : plane.offset();
+                addRegularPrism(
+                    *prismsMesh,
+                    tri.p0,
+                    tri.p1,
+                    tri.p2,
+                    planeNormal,
+                    projectionOffset,
+                    height);
+
+                if (VERBOSE_TRIANGLES) {
+                    std::cout << "  Ray result: "
+                              << (hitMesh ? "hit mesh" : "hit plane")
+                              << ", area = " << tri.area << ", dot = " << dot
+                              << ", height = " << height << ", V = "
+                              << volume << "\n";
+                }
+            }
+
+            ++localTriId;
+        }
+#endif
 
         outTriCount = localTriId;
         std::cout << "Plane normal: " << planeNormal
@@ -282,11 +467,13 @@ int main(int argc, char** argv)
     Point3d bestNormal     = fibNormals.front();
     uint    bestTriCount   = 0;
 
+    const auto totalRuntimeStart = std::chrono::steady_clock::now();
+
     // First pass: evaluate all planes and keep the one with minimum volume.
     for (uint i = 0; i < fibNormals.size(); ++i) {
         uint   tmpTriCount = 0;
-        double vol = evaluatePlane(
-            fibNormals[i], false, nullptr, nullptr, nullptr, nullptr, tmpTriCount);
+        double vol =
+            evaluatePlane(fibNormals[i], false, nullptr, nullptr, tmpTriCount);
 
         if (vol < bestVolume) {
             bestVolume   = vol;
@@ -303,9 +490,11 @@ int main(int argc, char** argv)
         true,
         &bestRaysMesh,
         &bestPrismsMesh,
-        &bestRaysMeshView,
-        &bestPrismsMeshView,
         debugTriCount);
+
+    const auto totalRuntimeEnd = std::chrono::steady_clock::now();
+    const auto totalRuntimeMs  = std::chrono::duration_cast<std::chrono::milliseconds>(
+        totalRuntimeEnd - totalRuntimeStart);
 
     {
         // Build a finite quad for Qt rendering of the best support plane.
@@ -352,15 +541,21 @@ int main(int argc, char** argv)
               << "\nBest plane normal: " << bestNormal
               << "\nTriangles processed on best plane: " << bestTriCount
               << "\nTriangles processed while collecting debug: " << debugTriCount
-              << "\nMinimum volume: " << bestVolume << "\n";
+              << "\nMinimum volume: " << bestVolume
+#ifdef VCL_EMBREE_FORCE_CHUNK_16
+              << "\nBranch: chunk16"
+#else
+              << "\nBranch: single-ray"
+#endif
+              << "\nTotal runtime ms: " << totalRuntimeMs.count() << "\n";
     std::cout << "Saved debug meshes:\n"
               << " - " << VCLIB_RESULTS_PATH << "/666_volume_prism_rays.ply\n"
               << " - " << VCLIB_RESULTS_PATH
               << "/666_volume_prism_prisms.ply\n";
 
     if (VISUAL) {
-        // Show mesh + best plane + sampled debug rays/prisms.
-        MeshViewerSelectQt mv;
+        // Show mesh + best plane + debug rays/prisms.
+        vcl::qt::MeshViewer mv;
 
         DrawableMesh<PolyMesh> drawableInput(std::move(m));
         drawableInput.name() = "input_mesh";
@@ -372,11 +567,11 @@ int main(int argc, char** argv)
 
         using enum vcl::MeshRenderInfo::Buffers;
 
-        DrawableMesh<EdgeMesh> drawableRays(std::move(bestRaysMeshView));
+        DrawableMesh<EdgeMesh> drawableRays(std::move(bestRaysMesh));
         drawableRays.name() = "debug_rays";
         drawableRays.updateBuffers({VERTICES, EDGES});
 
-        DrawableMesh<TriMesh> drawablePrisms(std::move(bestPrismsMeshView));
+        DrawableMesh<TriMesh> drawablePrisms(std::move(bestPrismsMesh));
         drawablePrisms.name() = "debug_prisms";
         drawablePrisms.updateBuffers();
 
