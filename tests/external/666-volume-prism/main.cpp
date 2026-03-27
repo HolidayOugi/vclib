@@ -47,7 +47,7 @@ int main(int argc, char** argv)
     constexpr uint   NUM_PLANES         = 10000;
     constexpr bool   VERBOSE_TRIANGLES  = false;
 
-    PolyMesh m = loadMesh<PolyMesh>(VCLIB_EXAMPLE_MESHES_PATH "/brain.ply");
+    PolyMesh m = loadMesh<PolyMesh>(VCLIB_EXAMPLE_MESHES_PATH "/brain_test.ply");
     embree::Scene scene(m);
 
     updateBoundingBox(m);
