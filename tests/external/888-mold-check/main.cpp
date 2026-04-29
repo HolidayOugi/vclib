@@ -153,18 +153,19 @@ int moldCheck(
 			computeCellGeometry(i, j, cellCenter, cellCorners);
 
 
-            
+            //add points
         };
         
 
         std::vector<uint> allCells(grid.rows * grid.cols);
 		std::iota(allCells.begin(), allCells.end(), 0);
 
-        vcl::parallelFor(allCells, [&](uint idx)) {
+        vcl::parallelFor(allCells, [&](uint idx) {
 				uint j = idx / grid.cols; 
 				uint i = idx % grid.cols; 
 				processCell(i, j);
-    };
+    });
+
 
     
 
