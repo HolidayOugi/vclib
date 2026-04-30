@@ -97,7 +97,7 @@ int moldCheck(
     Point3d u, v;
 		direction.orthoBase(u, v);
 		if (u.norm() <= EPS || v.norm() <= EPS) {
-			return std::numeric_limits<double>::infinity();
+			return 1;
 		}
 		u.normalize();
 		v.normalize();
@@ -130,7 +130,7 @@ int moldCheck(
 		const double lenU = maxU - minU;
 		const double lenV = maxV - minV;
 		if (lenU <= EPS || lenV <= EPS) {
-			return std::numeric_limits<double>::infinity();
+			return 1;
 		}
 
 		const GridChoice grid = chooseGrid(lenU, lenV);
