@@ -27,20 +27,18 @@
 #include <cmath>
 #include <limits>
 #include <numeric>
-#include <set>
-#include <utility>
 #include <vector>
 
 int moldCheck(
-	vcl::PolyMesh          m,
+	vcl::PolyMesh              m,
 	const std::vector<double>& gridCellSideLengths,
-    bool debug
-    ){
-    // Configuration: cone angle in degrees for filtering
-    const double CONE_ANGLE_DEGREES = 1.0;
+	bool                       debug)
+{
+	using namespace vcl;
+
+	// Configuration: cone angle in degrees for filtering
+	const double CONE_ANGLE_DEGREES = 45.0;
 	const double CONE_COS_THRESHOLD = std::cos(CONE_ANGLE_DEGREES * M_PI / 180.0);
-    
-    using namespace vcl;
     
     if (debug) {
         std::cout << "=== moldCheck started ===\n";
@@ -78,7 +76,8 @@ int moldCheck(
 
     updateBoundingBox(m);
 
-    const double EPS = 1e-6 * m.boundingBox().diagonal();
+	const double MAX_DISTANCE = m.boundingBox().diagonal();
+	const double EPS = 1e-12 * MAX_DISTANCE;
 
     embree::Scene scene(m);
 
@@ -91,7 +90,7 @@ int moldCheck(
 			minProj = std::min(minProj, vv.position().dot(direction));
 		}
 	
-    const Point3d planePoint = direction * minProj;
+	const Point3d planePoint = direction * minProj;
 	const Planed  plane(planePoint, direction);
 
     Point3d u, v;
@@ -159,16 +158,22 @@ int moldCheck(
 			cellCenter           = planePoint + u * centerU + v * centerV;
 		};
 
-        
-        // Mesh to collect hit points
-        vcl::PolyMesh hitPointsMesh;
-        std::vector<Point3d> allHitPoints(grid.rows * grid.cols);
-		std::vector<uint> allHitFaceIds(grid.rows * grid.cols, UINT_NULL);
-		std::vector<uint> allHitTriIds(grid.rows * grid.cols, UINT_NULL);
-		std::vector<Point3d> allRayOrigins(grid.rows * grid.cols);
-		std::vector<Point3d> allRayDirections(grid.rows * grid.cols);
 
-        auto processCell = [&](uint idx) {
+		struct CellData
+		{
+			double distance;
+			Point3d hitPoint;
+			bool hasHit = false;
+		};
+
+		const double nanValue = std::numeric_limits<double>::quiet_NaN();
+		const Point3d invalidPoint(nanValue, nanValue, nanValue);
+		std::vector<CellData> cells(
+			grid.rows * grid.cols,
+			CellData{MAX_DISTANCE, invalidPoint, false});
+		std::vector<CellData> clampedCells = cells;
+
+		auto computeCell = [&](uint idx) -> CellData {
 			uint j = idx / grid.cols; 
 			uint i = idx % grid.cols; 
 
@@ -176,190 +181,262 @@ int moldCheck(
 			std::array<Point3d, 4> cellCorners;
 			computeCellGeometry(i, j, cellCenter, cellCorners);
 
-            // Shoot a single ray from -eps before the plane
-            const Point3d rayOrigin = cellCenter + direction * (-EPS);
-            
-            allRayOrigins[idx] = rayOrigin;
-            allRayDirections[idx] = direction;
+			// Shoot a single ray from -eps before the plane
+			const Point3d rayOrigin = cellCenter + direction * (-EPS);
             
             auto [faceId, baryCoords, triId] = 
                 scene.firstFaceIntersectedByRay(rayOrigin, direction);
             
-            if (faceId != UINT_NULL) {
-                // Compute actual hit point using face vertices and barycentric coordinates
+			if (faceId != UINT_NULL) {
+				// Compute actual hit point using face vertices and barycentric coordinates
                 const auto& face = m.face(faceId);
-                
-                // Get the triangulation for this face
-                std::vector<uint> faceTriangulation = earCut(face);
-                
-                if (triId * 3 + 2 < faceTriangulation.size()) {
-                    const uint vi0 = faceTriangulation[triId * 3 + 0];
-                    const uint vi1 = faceTriangulation[triId * 3 + 1];
-                    const uint vi2 = faceTriangulation[triId * 3 + 2];
-                    
-                    const Point3d& p0 = face.vertex(vi0)->position();
-                    const Point3d& p1 = face.vertex(vi1)->position();
-                    const Point3d& p2 = face.vertex(vi2)->position();
-                    
-                    Point3d hitPoint = 
-                        p0 * baryCoords.x() + 
-                        p1 * baryCoords.y() + 
-                        p2 * baryCoords.z();
-                    
-                    allHitPoints[idx] = hitPoint;
-					allHitFaceIds[idx] = faceId;
-					allHitTriIds[idx] = triId;
-                }
+				std::vector<uint> faceTriangulation = earCut(face);
+
+				if (triId * 3 + 2 < faceTriangulation.size()) {
+					const uint vi0 = faceTriangulation[triId * 3 + 0];
+					const uint vi1 = faceTriangulation[triId * 3 + 1];
+					const uint vi2 = faceTriangulation[triId * 3 + 2];
+
+					const Point3d& p0 = face.vertex(vi0)->position();
+					const Point3d& p1 = face.vertex(vi1)->position();
+					const Point3d& p2 = face.vertex(vi2)->position();
+
+					const Point3d hitPoint =
+						p0 * baryCoords.x() + p1 * baryCoords.y() + p2 * baryCoords.z();
+
+					const double distance = std::abs((hitPoint - planePoint).dot(direction));
+					return CellData{distance, hitPoint, true};
+				}
             }
+
+			return CellData{MAX_DISTANCE, invalidPoint, false};
         };
         
 
         std::vector<uint> allCells(grid.rows * grid.cols);
 		std::iota(allCells.begin(), allCells.end(), 0);
 
-        vcl::parallelFor(allCells, processCell);
+		vcl::parallelFor(allCells, [&](uint idx) {
+			cells[idx] = computeCell(idx);
+		});
+
+		clampedCells = cells;
         
         if (debug) {
             std::cout << "Ray casting complete. Hit points: ";
             uint hitCount = 0;
-            for (uint i = 0; i < allHitPoints.size(); ++i) {
-                if (allHitFaceIds[i] != UINT_NULL) ++hitCount;
-            }
-            std::cout << hitCount << "/" << allCells.size() << "\n";
-            std::cout.flush();
-        }
-
-        // Lambda to check if a point is within a cone around another point's ray.
-        auto isInCone = [](
-            const Point3d& rayOrigin,
-            const Point3d& rayDirection,
-            const Point3d& testPoint,
-			double coneCosThreshold) -> bool
-        {
-            const Point3d toPoint = testPoint - rayOrigin;
-            const double projDist = toPoint.dot(rayDirection);
-            if (projDist < 0) return false;  // Point is behind ray origin
-            
-            const double toPointNorm = toPoint.norm();
-            if (toPointNorm < 1e-10) return true;  // Point coincides with origin
-            
-            const Point3d normalizedToPoint = toPoint / toPointNorm;
-			const double cosAngle = normalizedToPoint.dot(rayDirection);
-			return cosAngle >= coneCosThreshold;
-        };
-
-        // Filter points to keep only those without other points in their cone.
-        // Use a vector to collect results in parallel (thread-safe per-element write)
-        std::vector<bool> isFilteredPoints(allHitPoints.size(), false);
-        std::vector<uint> filterIndices;
-        filterIndices.reserve(allHitPoints.size());
-        for (uint i = 0; i < allHitPoints.size(); ++i) {
-            if (allHitFaceIds[i] != UINT_NULL) {
-                filterIndices.push_back(i);
-            }
-        }
-        
-        if (debug) {
-            std::cout << "Filtering " << filterIndices.size() << " points (parallel)...\n";
-            std::cout.flush();
-        }
-        
-        // Parallel filtering: each thread checks its point independently
-        auto filterPoint = [&](uint idx) {
-            uint i = filterIndices[idx];
-            
-            bool isFiltered = true;
-            for (uint j = 0; j < allHitPoints.size(); ++j) {
-                if (i == j || allHitFaceIds[j] == UINT_NULL) continue;
-                
-                // Check if point j is within the cone of point i
-				if (isInCone(allRayOrigins[i], allRayDirections[i], allHitPoints[j], CONE_COS_THRESHOLD)) {
-                    isFiltered = false;
-                    break;
+			for (uint i = 0; i < cells.size(); ++i) {
+				if (cells[i].distance < MAX_DISTANCE) {
+                    ++hitCount;
                 }
             }
-            
-            isFilteredPoints[i] = isFiltered;
-        };
-        
-        std::vector<uint> rangeIndices(filterIndices.size());
-        std::iota(rangeIndices.begin(), rangeIndices.end(), 0);
-        vcl::parallelFor(rangeIndices, filterPoint);
-        
-        // Build filtered set from results (single-threaded, no contention)
-        std::set<std::pair<uint, uint>> filteredFaceTriPairs;
-        for (uint i = 0; i < allHitPoints.size(); ++i) {
-            if (isFilteredPoints[i] && allHitFaceIds[i] != UINT_NULL) {
-                filteredFaceTriPairs.insert({allHitFaceIds[i], allHitTriIds[i]});
-            }
-        }
-        
-        if (debug) {
-            std::cout << "Filtering complete. Found " << filteredFaceTriPairs.size() << " filtered points.\n";
+            std::cout << hitCount << "/" << allCells.size() << " cells \n";
             std::cout.flush();
         }
 
+		// Lambda to check if point 'other' lies within angle threshold
+		// with respect to the direction from 'point' towards the plane.
+		// Correggi anche isWithinPlaneAngle
+		auto isWithinPlaneAngle = [&](
+			const Point3d& point,
+			const Point3d& other,
+			double         coneCosThreshold) -> bool
+		{
+			const Point3d directionToOther = other - point;
+			const double  directionToOtherNorm = directionToOther.norm();
+			if (directionToOtherNorm < EPS) return true;
+
+			// Il cono si apre verso il piano, quindi nella direzione -direction
+			const Point3d dirToPlane = -direction;
+			
+			const Point3d dirToOtherNormalized = directionToOther / directionToOtherNorm;
+			const double  cosBetween = dirToOtherNormalized.dot(dirToPlane);
+			return cosBetween > coneCosThreshold - EPS; // Usa -EPS invece di +EPS per essere più permissivo
+		};
+
+		// Filter points to keep only those without other points in their cone.
+		std::vector<uint> filterIndices;
+		filterIndices.reserve(clampedCells.size());
+		for (uint i = 0; i < clampedCells.size(); ++i) {
+			if (clampedCells[i].distance < MAX_DISTANCE && clampedCells[i].hasHit) {
+				filterIndices.push_back(i);
+			}
+		}
+
 		if (debug) {
-			// Create mesh from hit points (only non-zero hits).
-			for (const auto& pt : allHitPoints) {
-				if (pt != Point3d(0, 0, 0)) {
-					hitPointsMesh.addVertex(pt);
+			std::cout << "Filtering " << filterIndices.size() << " points\n";
+			std::cout.flush();
+		}
+
+		auto computeClampedCell = [&](uint idx) -> CellData {
+			const uint i = filterIndices[idx];
+			const CellData baseCell = clampedCells[i];
+			if (!baseCell.hasHit) {
+				return baseCell;
+			}
+
+			const Point3d original = baseCell.hitPoint;
+			double t_required = 0.0;
+
+			// Funzione per trovare quanto spostare 'a' verso il piano (direzione -direction)
+			// affinché l'angolo tra (b - (a - t*direction)) e -direction sia >= soglia
+			auto coneBoundaryStep = [&](const Point3d& a, const Point3d& b) -> double {
+				// Vogliamo che il punto b sia FUORI dal cono di a
+				// Il cono di a ha vertice in a e si apre nella direzione -direction
+				// Vogliamo: angle(b - new_a, -direction) >= threshold
+				// dove new_a = a - t*direction
+				
+				const Point3d ab = b - a;
+				
+				// Se b è già fuori dal cono (angolo sufficientemente grande), t=0
+				const double ab_norm = ab.norm();
+				if (ab_norm < EPS) return 0.0;
+				
+				const double cos_angle = (ab / ab_norm).dot(-direction);
+				if (cos_angle <= CONE_COS_THRESHOLD) {
+					return 0.0; // b è già fuori dal cono
+				}
+				
+				// Dobbiamo trovare t tale che:
+				// dot((b - (a - t*d)) / |b - (a - t*d)|, -d) = cos_threshold
+				// Dove d = direction
+				
+				// Sia v = b - a, d = direction
+				// new_v = v + t*d
+				// Vogliamo: dot(new_v / |new_v|, -d) = cos_threshold
+				
+				const Point3d v = b - a;
+				const double v_dot_d = v.dot(direction);
+				const double v_norm2 = v.dot(v);
+				
+				// L'equazione è: -(v_dot_d + t) / sqrt(v_norm2 + 2*t*v_dot_d + t²) = cos_threshold
+				// => -(v_dot_d + t) = cos_threshold * sqrt(v_norm2 + 2*t*v_dot_d + t²)
+				// Quadrando: (v_dot_d + t)² = cos²_threshold * (v_norm2 + 2*t*v_dot_d + t²)
+				
+				const double cos2 = CONE_COS_THRESHOLD * CONE_COS_THRESHOLD;
+				const double sin2 = 1.0 - cos2;
+				
+				// sin² * t² + 2*(v_dot_d - cos²*v_dot_d)*t + (v_dot_d² - cos²*v_norm2) = 0
+				// sin² * t² + 2*v_dot_d*sin²*t + (v_dot_d² - cos²*v_norm2) = 0
+				
+				const double a_eq = sin2;
+				const double b_eq = 2.0 * v_dot_d * sin2;
+				const double c_eq = v_dot_d * v_dot_d - cos2 * v_norm2;
+				
+				const double discriminant = b_eq * b_eq - 4.0 * a_eq * c_eq;
+				
+				if (discriminant <= 0.0) {
+					// Nessuna soluzione reale, sposta completamente
+					return v_dot_d; // Sposta abbastanza da allineare con il piano
+				}
+				
+				const double sqrt_disc = std::sqrt(discriminant);
+				const double t1 = (-b_eq - sqrt_disc) / (2.0 * a_eq);
+				const double t2 = (-b_eq + sqrt_disc) / (2.0 * a_eq);
+				
+				// Prendi la soluzione positiva più piccola
+				double t = std::numeric_limits<double>::max();
+				if (t1 > EPS) t = std::min(t, t1);
+				if (t2 > EPS) t = std::min(t, t2);
+				
+				if (t > std::abs(v_dot_d)) {
+					return std::abs(v_dot_d); // Non andare oltre il piano
+				}
+				
+				return t;
+			};
+
+			bool anyCone = false;
+
+			for (uint j = 0; j < cells.size(); ++j) {
+				if (i == j || !cells[j].hasHit) continue;
+
+				if (!isWithinPlaneAngle(original, cells[j].hitPoint, CONE_COS_THRESHOLD))
+					continue;
+				
+				anyCone = true;
+
+				const double t = coneBoundaryStep(original, cells[j].hitPoint);
+				if (t > t_required) {
+					t_required = t;
 				}
 			}
 
-			// Store hit triangles as explicit (faceId, triId) pairs for readability.
-			std::set<std::pair<uint, uint>> hitTriangles;
-			for (uint idx = 0; idx < allHitFaceIds.size(); ++idx) {
-				if (allHitFaceIds[idx] != UINT_NULL && allHitTriIds[idx] != UINT_NULL) {
-					hitTriangles.insert({allHitFaceIds[idx], allHitTriIds[idx]});
-				}
+			if (!anyCone) {
+				return baseCell;
 			}
 
-			// Build a triangulated copy of the input mesh for per-triangle coloring.
-			vcl::TriMesh debugTriMesh;
-			for (const auto& vtx : m.vertices()) {
-				debugTriMesh.addVertex(vtx.position());
+			// Sposta il punto verso il piano
+			const Point3d currentPoint = original - direction * t_required;
+			const double distanceToPlane = std::abs((currentPoint - planePoint).dot(direction));
+			
+			return CellData{distanceToPlane, currentPoint, true};
+		};
+
+		for (uint idx = 0; idx < filterIndices.size(); ++idx) {
+			if (idx % 1000 == 0) {
+				std::cout << "Filtering progress: " << idx
+						  << "/" << filterIndices.size() << "\n";
+				std::cout.flush();
 			}
+			const uint i = filterIndices[idx];
+			clampedCells[i] = computeClampedCell(idx);
+		}
 
-			debugTriMesh.enablePerFaceColor();
-			for (const auto& face : m.faces()) {
-				const std::vector<uint> faceTriangulation = earCut(face);
-				for (uint t = 0; t * 3 + 2 < faceTriangulation.size(); ++t) {
-					const uint vi0 = face.vertex(faceTriangulation[t * 3 + 0])->index();
-					const uint vi1 = face.vertex(faceTriangulation[t * 3 + 1])->index();
-					const uint vi2 = face.vertex(faceTriangulation[t * 3 + 2])->index();
+		auto validateClampedCells = [&]() {
+			uint violatingPoints = 0;
+			for (uint i = 0; i < clampedCells.size(); ++i) {
+				if (!clampedCells[i].hasHit) continue;
 
-					const uint newFaceId = debugTriMesh.addFace(vi0, vi1, vi2);
+				const Point3d& point = clampedCells[i].hitPoint;
 
-					if (hitTriangles.contains({face.index(), t})) {
-						debugTriMesh.face(newFaceId).color() = vcl::Color::Yellow;
+				for (uint j = 0; j < clampedCells.size(); ++j) {
+					if (i == j || !clampedCells[j].hasHit) continue;
+
+					const Point3d dirToOther = (clampedCells[j].hitPoint - point);
+					const double norm = dirToOther.norm();
+					if (norm < EPS) continue;
+					
+					// Check angle with -direction (direction towards plane)
+					const double cosVal = (dirToOther / norm).dot(-direction);
+
+					if (cosVal > CONE_COS_THRESHOLD + EPS) {
+						std::cout << "Violation idx=" << i << " j=" << j
+								<< " cosVal=" << cosVal
+								<< " threshold=" << CONE_COS_THRESHOLD
+								<< " angle_deg=" << std::acos(cosVal) * 180.0 / M_PI
+								<< " dist=" << norm
+								<< "\n";
+						++violatingPoints;
+						break;
 					}
 				}
 			}
 
-			// Build filtered mesh with red-colored triangles.
-			vcl::TriMesh filteredTriMesh;
-			for (const auto& vtx : m.vertices()) {
-				filteredTriMesh.addVertex(vtx.position());
-			}
+			std::cout << "Clamped validation: "
+					<< (violatingPoints == 0 ? "OK" : "VIOLATIONS")
+					<< " (violating points: " << violatingPoints << ")\n";
+			std::cout.flush();
+		};
 
-			filteredTriMesh.enablePerFaceColor();
-			for (const auto& face : m.faces()) {
-				const std::vector<uint> faceTriangulation = earCut(face);
-				for (uint t = 0; t * 3 + 2 < faceTriangulation.size(); ++t) {
-					const uint vi0 = face.vertex(faceTriangulation[t * 3 + 0])->index();
-					const uint vi1 = face.vertex(faceTriangulation[t * 3 + 1])->index();
-					const uint vi2 = face.vertex(faceTriangulation[t * 3 + 2])->index();
-
-					const uint newFaceId = filteredTriMesh.addFace(vi0, vi1, vi2);
-
-					if (filteredFaceTriPairs.contains({face.index(), t})) {
-						filteredTriMesh.face(newFaceId).color() = vcl::Color::Red;
-					}
+		if (debug) {
+			validateClampedCells();
+			vcl::PolyMesh hitPointsMesh;
+			for (uint i = 0; i < clampedCells.size(); ++i) {
+				if (clampedCells[i].hasHit) {
+					hitPointsMesh.addVertex(cells[i].hitPoint);
 				}
 			}
 
-			// Build plane mesh as a quad spanning the projection bounds.
+			vcl::PolyMesh clampedPointsMesh;
+			clampedPointsMesh.enablePerVertexColor();
+			for (uint i = 0; i < clampedCells.size(); ++i) {
+				if (!clampedCells[i].hasHit) continue;
+				if (cells[i].distance == clampedCells[i].distance) continue;
+				const uint vId = clampedPointsMesh.addVertex(clampedCells[i].hitPoint);
+				clampedPointsMesh.vertex(vId).color() = vcl::Color::Red;
+			}
+
 			vcl::TriMesh planeMesh;
 			const double margin = 0.1 * std::max(lenU, lenV);
 			const Point3d p0 = planePoint + u * (minU - margin) + v * (minV - margin);
@@ -377,19 +454,17 @@ int moldCheck(
 
 			const std::string base = std::string(VCLIB_RESULTS_PATH) + "/888_mold_check";
 			saveMesh(hitPointsMesh, base + "_hit_points.ply");
-			saveMesh(debugTriMesh, base + "_hit_triangles_yellow.ply");
-			saveMesh(filteredTriMesh, base + "_filtered_red.ply");
+			saveMesh(clampedPointsMesh, base + "_clamped_points_red.ply");
 			saveMesh(planeMesh, base + "_plane.ply");
 
 			std::cout << "Found " << hitPointsMesh.vertexCount() << " hit points\n";
-			std::cout << "Filtered points: " << filteredFaceTriPairs.size() << "\n";
+			std::cout << "Clamped points: " << clampedPointsMesh.vertexCount() << "\n";
 			std::cout << "Saved debug meshes:\n"
-					  << " - " << base << "_hit_points.ply\n"
-					  << " - " << base << "_hit_triangles_yellow.ply\n"
-					  << " - " << base << "_filtered_red.ply\n"
-					  << " - " << base << "_plane.ply\n";
+					<< " - " << base << "_hit_points.ply\n"
+					<< " - " << base << "_clamped_points_red.ply\n"
+					<< " - " << base << "_plane.ply\n";
 		}
-
+		
         if (debug) {
             std::cout << "=== moldCheck completed successfully ===\n";
             std::cout.flush();
@@ -406,7 +481,7 @@ int main()
 
     constexpr bool debug = true;
 
-    std::vector<double> gridCellSideLengths = {0.3, 0.3};
+    std::vector<double> gridCellSideLengths = {0.1, 0.1};
 
     return moldCheck(std::move(m), gridCellSideLengths, debug);
 }
