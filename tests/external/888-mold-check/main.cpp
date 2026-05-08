@@ -460,7 +460,7 @@ int moldCheck(
 			planeMesh.addFace(v0, v1, v2);
 			planeMesh.addFace(v0, v2, v3);
 
-			const std::string base = std::string(VCLIB_RESULTS_PATH) + "/888_mold_check";
+			const std::string base = std::string(VCLIB_EXTERNAL_RESULTS_PATH) + "/888_mold_check";
 			saveMesh(hitPointsMesh, base + "_hit_points.ply");
 			saveMesh(clampedonlyPointsMesh, base + "_clamped_only_points.ply");
 			saveMesh(clampedPointsMesh, base + "_all_clamped_points.ply");
