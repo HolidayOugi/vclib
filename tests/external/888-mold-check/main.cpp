@@ -24,7 +24,6 @@
 #include <vclib/io.h>
 #include <vclib/meshes.h>
 
-#include <chrono>
 #include <cmath>
 #include <limits>
 #include <numeric>
@@ -33,62 +32,13 @@
 int moldCheck(
 	vcl::PolyMesh              m,
 	const std::vector<double>& gridCellSideLengths,
-	bool                       debug,
-	vcl::Point3d 			   direction)
+	bool                       debug)
 {
 	using namespace vcl;
 
 	// Configuration: cone angle in degrees for filtering
-	const double CONE_ANGLE_DEGREES = 10.0;
+	const double CONE_ANGLE_DEGREES = 1.0;
 	const double CONE_COS_THRESHOLD = std::cos(CONE_ANGLE_DEGREES * M_PI / 180.0);
-
-	auto addQuadPrism = [](TriMesh& tm,
-							const std::array<Point3d, 4>& baseCorners,
-						double startOffset,
-						double endOffset,
-							const Point3d& dir,
-							const Color& faceColor) {
-		tm.enablePerFaceColor();
-		std::array<Point3d, 4> b;
-		std::array<Point3d, 4> t;
-		for (uint k = 0; k < 4; ++k) {
-			b[k] = baseCorners[k] + dir * startOffset;
-			t[k] = baseCorners[k] + dir * endOffset;
-		}
-
-		std::array<uint, 8> ids;
-		for (uint k = 0; k < 4; ++k) {
-			ids[k + 0] = tm.addVertex(b[k]);
-			ids[k + 4] = tm.addVertex(t[k]);
-		}
-
-		auto addFaceWithColor = [&](auto... faceVertices) {
-			const uint fid = tm.addFace(faceVertices...);
-			tm.face(fid).color() = faceColor;
-		};
-
-		// Bottom
-		addFaceWithColor(ids[0], ids[2], ids[1]);
-		addFaceWithColor(ids[0], ids[3], ids[2]);
-		addFaceWithColor(ids[4], ids[5], ids[6]);
-		addFaceWithColor(ids[4], ids[6], ids[7]);
-
-		// Sides
-		addFaceWithColor(ids[0], ids[1], ids[5]);
-		addFaceWithColor(ids[0], ids[5], ids[4]);
-		addFaceWithColor(ids[1], ids[2], ids[6]);
-		addFaceWithColor(ids[1], ids[6], ids[5]);
-		addFaceWithColor(ids[2], ids[3], ids[7]);
-		addFaceWithColor(ids[2], ids[7], ids[6]);
-		addFaceWithColor(ids[3], ids[0], ids[4]);
-		addFaceWithColor(ids[3], ids[4], ids[7]);
-	};
-
-	auto addSegment = [](EdgeMesh& em, const Point3d& a, const Point3d& b) {
-		const uint va = em.addVertex(a);
-		const uint vb = em.addVertex(b);
-		em.addEdge(va, vb);
-	};
     
     if (debug) {
         std::cout << "=== moldCheck started ===\n";
@@ -131,6 +81,8 @@ int moldCheck(
 
     embree::Scene scene(m);
 
+    Point3d direction(1.0, 1.0, 0.0);
+
     direction.normalize();
 
     double minProj = std::numeric_limits<double>::infinity();
@@ -162,10 +114,10 @@ int moldCheck(
 			const double pu = rel.dot(u);
 			const double pv = rel.dot(v);
 
-			minU = std::min(minU, pu - 0.2 * MAX_DISTANCE);
-			minV = std::min(minV, pv - 0.2 * MAX_DISTANCE);
-			maxU = std::max(maxU, pu + 0.2 * MAX_DISTANCE);
-			maxV = std::max(maxV, pv + 0.2 * MAX_DISTANCE);
+			minU = std::min(minU, pu - 0.5 * MAX_DISTANCE);
+			minV = std::min(minV, pv - 0.5 * MAX_DISTANCE);
+			maxU = std::max(maxU, pu + 0.5 * MAX_DISTANCE);
+			maxV = std::max(maxV, pv + 0.5 * MAX_DISTANCE);
 		}
 
 		const double lenU = maxU - minU;
@@ -203,8 +155,6 @@ int moldCheck(
 
 		struct CellData
 		{
-			std::array<Point3d, 4> cellCorners;
-			Point3d cellCenter;
 			double distance;
 			Point3d hitPoint;
 			bool hasHit = false;
@@ -245,11 +195,11 @@ int moldCheck(
 						p0 * baryCoords.x() + p1 * baryCoords.y() + p2 * baryCoords.z();
 
 					const double distance = std::abs((hitPoint - planePoint).dot(direction));
-					return CellData{cellCorners, cellCenter, distance, hitPoint, true};
+					return CellData{distance, hitPoint, true};
 				}
             }
 
-			return CellData{cellCorners, cellCenter, MAX_DISTANCE, invalidPoint, false};
+			return CellData{MAX_DISTANCE, invalidPoint, false};
         };
         
 
@@ -377,9 +327,6 @@ int moldCheck(
 				return baseCell;
 			}*/
 
-			const Point3d cellCenter = baseCell.cellCenter;
-			const std::array<Point3d, 4> cellCorners = baseCell.cellCorners;
-
 			const Point3d original = baseCell.hitPoint;
 			double t_required = 0.0;
 
@@ -410,7 +357,7 @@ int moldCheck(
 			const Point3d currentPoint = original - direction * t_required;
 			const double distanceToPlane = std::abs((currentPoint - planePoint).dot(direction));
 			
-			return CellData{cellCorners, cellCenter, distanceToPlane, currentPoint, true};
+			return CellData{distanceToPlane, currentPoint, true};
 		};
 
 		/*for (uint idx = 0; idx < filterIndices.size(); ++idx) {
@@ -465,32 +412,21 @@ int moldCheck(
 			std::cout << "Validating clamped cells...\n";
 			std::cout.flush();
 
-			//validateClampedCells();
+			validateClampedCells();
 			vcl::PolyMesh hitPointsMesh;
-			hitPointsMesh.enablePerVertexColor();
 			for (uint i = 0; i < cells.size(); ++i) {
 				if (cells[i].hasHit) {
-					const uint vId = hitPointsMesh.addVertex(cells[i].hitPoint);
-					hitPointsMesh.vertex(vId).color() = vcl::Color::Yellow;
+					hitPointsMesh.addVertex(cells[i].hitPoint);
 				}
 			}
 
 			vcl::PolyMesh clampedonlyPointsMesh;
 			clampedonlyPointsMesh.enablePerVertexColor();
 			for (uint i = 0; i < clampedCells.size(); ++i) {
-				if (!cells[i].hasHit) continue;
+				if (!clampedCells[i].hasHit) continue;
 				if (cells[i].distance == clampedCells[i].distance) continue;
 				const uint vId = clampedonlyPointsMesh.addVertex(clampedCells[i].hitPoint);
 				clampedonlyPointsMesh.vertex(vId).color() = vcl::Color::Red;
-			}
-
-			vcl::PolyMesh clampednohitPointsMesh;
-			clampednohitPointsMesh.enablePerVertexColor();
-			for (uint i = 0; i < clampedCells.size(); ++i) {
-				if (cells[i].hasHit) continue;
-				if (cells[i].distance == clampedCells[i].distance) continue;
-				const uint vId = clampednohitPointsMesh.addVertex(clampedCells[i].hitPoint);
-				clampednohitPointsMesh.vertex(vId).color() = vcl::Color::White;
 			}
 
 			vcl::PolyMesh clampedPointsMesh;
@@ -524,46 +460,20 @@ int moldCheck(
 			planeMesh.addFace(v0, v1, v2);
 			planeMesh.addFace(v0, v2, v3);
 
-			vcl::TriMesh ClampedPrismMesh;
-			for (uint i = 0; i < clampedCells.size(); ++i) {
-				if (!clampedCells[i].hasHit) continue;
-				addQuadPrism(ClampedPrismMesh, clampedCells[i].cellCorners, -EPS, clampedCells[i].distance, direction, vcl::Color::White);
-			}
-
-			vcl::TriMesh remainingMoldMesh;
-			vcl::EdgeMesh segmentsRemainingMold;
-			for (uint i = 0; i < clampedCells.size(); ++i) {
-				if (!cells[i].hasHit) continue;
-				if (cells[i].distance == clampedCells[i].distance) continue;
-				addQuadPrism(remainingMoldMesh, clampedCells[i].cellCorners, clampedCells[i].distance, cells[i].distance, direction, vcl::Color::Red);
-				addSegment(segmentsRemainingMold, clampedCells[i].hitPoint, cells[i].hitPoint);
-			}
-			
-
-
 			const std::string base = std::string(VCLIB_RESULTS_PATH) + "/888_mold_check";
 			saveMesh(hitPointsMesh, base + "_hit_points.ply");
 			saveMesh(clampedonlyPointsMesh, base + "_clamped_only_points.ply");
-			saveMesh(clampednohitPointsMesh, base + "_clamped_nohit_points.ply");
 			saveMesh(clampedPointsMesh, base + "_all_clamped_points.ply");
 			saveMesh(planeMesh, base + "_plane.ply");
 			saveMesh(missedPointsMesh, base + "_missed_points.ply");
-			saveMesh(ClampedPrismMesh, base + "_clamped_prisms.ply");
-			saveMesh(remainingMoldMesh, base + "_remaining_mold.ply");
-			saveMesh(segmentsRemainingMold, base + "_remaining_mold_segments.ply");
 
 			std::cout << "Clamped points: " << clampedPointsMesh.vertexCount() << "\n";
 			std::cout << "Saved debug meshes:\n"
 					<< " - " << base << "_hit_points.ply\n"
 					<< " - " << base << "_clamped_only_points.ply\n"
-					<< " - " << base << "_clamped_nohit_points.ply\n"
 					<< " - " << base << "_all_clamped_points.ply\n"
 					<< " - " << base << "_plane.ply\n"
-					<< " - " << base << "_missed_points.ply\n"
-					<< " - " << base << "_clamped_prisms.ply\n"
-					<< " - " << base << "_remaining_mold.ply\n"
-					<< " - " << base << "_remaining_mold_segments.ply\n";
-			std::cout.flush();
+					<< " - " << base << "_missed_points.ply\n";
 		}
 		
         if (debug) {
@@ -578,20 +488,11 @@ int main()
 {
     using namespace vcl;
 
-	const auto startTime = std::chrono::steady_clock::now();
-
-	Point3d direction(-0.2124352, 0.564385348, 0.53495349532);
-
     PolyMesh m = loadMesh<PolyMesh>(VCLIB_EXAMPLE_MESHES_PATH "/bunny_enlarged.ply");
 
     constexpr bool debug = true;
 
-    std::vector<double> gridCellSideLengths = {0.4, 0.4};
+    std::vector<double> gridCellSideLengths = {0.3, 0.3};
 
-    const int result = moldCheck(std::move(m), gridCellSideLengths, debug, direction);
-    const auto endTime = std::chrono::steady_clock::now();
-    const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);
-    std::cout << "moldCheck execution time: " << elapsedMs.count() << " ms\n";
-    std::cout.flush();
-    return result;
+    return moldCheck(std::move(m), gridCellSideLengths, debug);
 }
