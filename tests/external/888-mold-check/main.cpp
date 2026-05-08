@@ -34,8 +34,8 @@
 
 struct GridChoice
 {
-	uint rows = 1;
-	uint cols = 1;
+	vcl::uint rows = 1;
+	vcl::uint cols = 1;
 
 	double sideU = 0.0;
 	double sideV = 0.0;
@@ -109,6 +109,9 @@ static void makeGrid(
 	GridChoice&                grid,
 	const std::vector<double>& gridCellSideLengths)
 {
+
+	using namespace vcl;
+
 	const double lenU = grid.maxU - grid.minU;
 	const double lenV = grid.maxV - grid.minV;
 
@@ -200,7 +203,7 @@ static CellData shootRayOnCell(
 // MAKE CELL
 
 static CellData makeCellGeometry(
-	uint idx,
+	vcl::uint idx,
 	const GridChoice& grid,
 	const vcl::Point3d& planePoint,
 	const vcl::Point3d& u,
@@ -392,14 +395,15 @@ static double coneBoundaryStep(
 }
 
 static CellData computeClampedCell(
-	uint i,
+	vcl::uint i,
 	const std::vector<CellData>& cells,
-	const std::vector<CellData>& clampedCells,
 	const vcl::Point3d& planePoint,
 	const vcl::Point3d& direction,
 	double coneCosThreshold,
 	double eps)
 {
+	using namespace vcl;
+
 	const CellData baseCell = cells[i];
 
 	const vcl::Point3d original = baseCell.hitPoint;
@@ -455,11 +459,14 @@ static CellData computeClampedCell(
 
 static void validateClampedCells(
 	const std::vector<CellData>& clampedCells,
-	const std::vector<uint>& allCells,
+	const std::vector<vcl::uint>& allCells,
 	const vcl::Point3d& direction,
 	double coneCosThreshold,
 	double eps)
 {
+
+	using namespace vcl;
+
 	std::atomic<uint> violatingPoints{0};
 
 	vcl::parallelFor(allCells, [&](uint i) {
@@ -504,14 +511,14 @@ static void validateClampedCells(
 
 //DEBUG PRISM CREATION
 
-static uint addFaceWithColor(
+static vcl::uint addFaceWithColor(
 	vcl::TriMesh& tm,
-	uint          v0,
-	uint          v1,
-	uint          v2,
+	vcl::uint          v0,
+	vcl::uint          v1,
+	vcl::uint          v2,
 	const vcl::Color& faceColor)
 {
-	const uint fid = tm.addFace(v0, v1, v2);
+	const vcl::uint fid = tm.addFace(v0, v1, v2);
 	tm.face(fid).color() = faceColor;
 	return fid;
 }
@@ -524,6 +531,9 @@ static void addQuadPrism(
 	const vcl::Point3d& dir,
 	const vcl::Color& faceColor)
 {
+
+	using namespace vcl;
+
 	tm.enablePerFaceColor();
 
 	std::array<vcl::Point3d, 4> b;
@@ -570,8 +580,8 @@ static void addSegment(
 	const vcl::Point3d& a,
 	const vcl::Point3d& b)
 {
-	const uint va = em.addVertex(a);
-	const uint vb = em.addVertex(b);
+	const vcl::uint va = em.addVertex(a);
+	const vcl::uint vb = em.addVertex(b);
 
 	em.addEdge(va, vb);
 }
@@ -583,7 +593,7 @@ static void addColoredPoint(
 	const vcl::Point3d& point,
 	const vcl::Color& color)
 {
-	const uint vId = mesh.addVertex(point);
+	const vcl::uint vId = mesh.addVertex(point);
 	mesh.vertex(vId).color() = color;
 }
 
@@ -710,7 +720,7 @@ int moldCheck(
 
 
 	parallelFor(allCells, [&](uint idx) {
-		clampedCells[idx] = computeClampedCell(idx, cells, clampedCells, planePoint, direction, CONE_COS_THRESHOLD, EPS);
+		clampedCells[idx] = computeClampedCell(idx, cells, planePoint, direction, CONE_COS_THRESHOLD, EPS);
 	});
 
 
