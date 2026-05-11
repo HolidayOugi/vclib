@@ -31,6 +31,7 @@
 #include <cmath>
 #include <limits>
 #include <numeric>
+#include <unordered_set>
 #include <vector>
 
 //STRUCTS
@@ -62,6 +63,8 @@ struct ConnectedComponentData
 {
 	std::vector<vcl::uint> indices;
 	double area = 0.0;
+	double perimeter = 0.0;
+	double compactness = 0.0;
 };
 
 //MAKE PLANE
@@ -544,7 +547,38 @@ static void pushNeighbor(
 	}
 }
 
-static ConnectedComponentData largestConnectedRemainingComponent(
+static double componentGridPerimeter(
+	const std::vector<vcl::uint>& componentIndices,
+	const GridChoice& grid)
+{
+	using namespace vcl;
+
+	double perimeter = 0.0;
+	std::unordered_set<uint> componentSet(
+		componentIndices.begin(), componentIndices.end());
+
+	for (uint idx : componentIndices) {
+		const uint row = idx / grid.cols;
+		const uint col = idx % grid.cols;
+
+		if (col == 0 || componentSet.count(idx - 1) == 0) {
+			perimeter += grid.sideV;
+		}
+		if (col + 1 == grid.cols || componentSet.count(idx + 1) == 0) {
+			perimeter += grid.sideV;
+		}
+		if (row == 0 || componentSet.count(idx - grid.cols) == 0) {
+			perimeter += grid.sideU;
+		}
+		if (row + 1 == grid.rows || componentSet.count(idx + grid.cols) == 0) {
+			perimeter += grid.sideU;
+		}
+	}
+
+	return perimeter;
+}
+
+static ConnectedComponentData largestConnectedComponent(
 	const std::vector<CellData>& cells,
 	const std::vector<CellData>& clampedCells,
 	const GridChoice& grid,
@@ -613,6 +647,9 @@ static ConnectedComponentData largestConnectedRemainingComponent(
 	for (uint idx : result.indices) {
 		result.area += grid.sideU * grid.sideV;
 	}
+
+	result.perimeter = componentGridPerimeter(result.indices, grid);
+	result.compactness = (result.perimeter > 0.0) ? (result.area / result.perimeter) : 0.0;
 
 	return result;
 }
@@ -759,6 +796,92 @@ static void addSegment(
 	em.addEdge(va, vb);
 }
 
+static void addSegment(
+	vcl::EdgeMesh& em,
+	vcl::uint va,
+	vcl::uint vb)
+{
+	em.addEdge(va, vb);
+}
+
+static vcl::uint gridVertexIndex(
+	vcl::uint row,
+	vcl::uint col,
+	const GridChoice& grid)
+{
+	return row * (grid.cols + 1) + col;
+}
+
+static void accumulateGridCorner(
+	std::vector<vcl::Point3d>& gridVertexPositions,
+	std::vector<vcl::uint>& gridVertexCounts,
+	vcl::uint row,
+	vcl::uint col,
+	const GridChoice& grid,
+	const vcl::Point3d& point)
+{
+	const vcl::uint vertexIndex = gridVertexIndex(row, col, grid);
+	gridVertexPositions[vertexIndex] += point;
+	++gridVertexCounts[vertexIndex];
+}
+
+static vcl::uint meshVertexId(
+	vcl::EdgeMesh& em,
+	const std::vector<vcl::Point3d>& gridVertexPositions,
+	const std::vector<vcl::uint>& gridVertexCounts,
+	std::vector<vcl::uint>& meshVertexIds,
+	vcl::uint row,
+	vcl::uint col,
+	const GridChoice& grid)
+{
+	const vcl::uint vertexIndex = gridVertexIndex(row, col, grid);
+
+	if (meshVertexIds[vertexIndex] != vcl::UINT_NULL) {
+		return meshVertexIds[vertexIndex];
+	}
+
+	vcl::Point3d point = gridVertexPositions[vertexIndex];
+
+	if (gridVertexCounts[vertexIndex] > 0) {
+		point /= gridVertexCounts[vertexIndex];
+	}
+
+	meshVertexIds[vertexIndex] = em.addVertex(point);
+	return meshVertexIds[vertexIndex];
+}
+
+static void addGridSegment(
+	vcl::EdgeMesh& em,
+	const std::vector<vcl::Point3d>& gridVertexPositions,
+	const std::vector<vcl::uint>& gridVertexCounts,
+	std::vector<vcl::uint>& meshVertexIds,
+	vcl::uint row0,
+	vcl::uint col0,
+	vcl::uint row1,
+	vcl::uint col1,
+	const GridChoice& grid)
+{
+	const vcl::uint va = meshVertexId(
+		em,
+		gridVertexPositions,
+		gridVertexCounts,
+		meshVertexIds,
+		row0,
+		col0,
+		grid);
+
+	const vcl::uint vb = meshVertexId(
+		em,
+		gridVertexPositions,
+		gridVertexCounts,
+		meshVertexIds,
+		row1,
+		col1,
+		grid);
+
+	addSegment(em, va, vb);
+}
+
 //DEBUG COLOR POINT CREATION
 
 static void addColoredPoint(
@@ -806,6 +929,112 @@ static vcl::TriMesh makeDebugPlaneMesh(
 	planeMesh.addFace(v0, v2, v3);
 
 	return planeMesh;
+}
+
+vcl::EdgeMesh createPerimeterSegments(
+	const std::vector<vcl::uint>& componentIndices,
+	const std::vector<CellData>& cells,
+	const GridChoice& grid)
+{
+	using namespace vcl;
+
+	EdgeMesh em;
+
+	std::unordered_set<uint> componentSet(componentIndices.begin(), componentIndices.end());
+	std::vector<Point3d> gridVertexPositions((grid.rows + 1) * (grid.cols + 1));
+	std::vector<uint> gridVertexCounts(gridVertexPositions.size(), 0);
+	std::vector<uint> meshVertexIds(gridVertexPositions.size(), UINT_NULL);
+
+	for (uint idx : componentIndices) {
+		const uint row = idx / grid.cols;
+		const uint col = idx % grid.cols;
+		const CellData& cell = cells[idx];
+
+		accumulateGridCorner(
+			gridVertexPositions,
+			gridVertexCounts,
+			row,
+			col,
+			grid,
+			cell.cellCorners[0]);
+		accumulateGridCorner(
+			gridVertexPositions,
+			gridVertexCounts,
+			row,
+			col + 1,
+			grid,
+			cell.cellCorners[1]);
+		accumulateGridCorner(
+			gridVertexPositions,
+			gridVertexCounts,
+			row + 1,
+			col + 1,
+			grid,
+			cell.cellCorners[2]);
+		accumulateGridCorner(
+			gridVertexPositions,
+			gridVertexCounts,
+			row + 1,
+			col,
+			grid,
+			cell.cellCorners[3]);
+	}
+
+	for (uint idx : componentIndices) {
+		const uint row = idx / grid.cols;
+		const uint col = idx % grid.cols;
+
+		if (col == 0 || componentSet.count(idx - 1) == 0) {
+			addGridSegment(
+				em,
+				gridVertexPositions,
+				gridVertexCounts,
+				meshVertexIds,
+				row,
+				col,
+				row + 1,
+				col,
+				grid);
+		}
+		if (col + 1 == grid.cols || componentSet.count(idx + 1) == 0) {
+			addGridSegment(
+				em,
+				gridVertexPositions,
+				gridVertexCounts,
+				meshVertexIds,
+				row,
+				col + 1,
+				row + 1,
+				col + 1,
+				grid);
+		}
+		if (row == 0 || componentSet.count(idx - grid.cols) == 0) {
+			addGridSegment(
+				em,
+				gridVertexPositions,
+				gridVertexCounts,
+				meshVertexIds,
+				row,
+				col,
+				row,
+				col + 1,
+				grid);
+		}
+		if (row + 1 == grid.rows || componentSet.count(idx + grid.cols) == 0) {
+			addGridSegment(
+				em,
+				gridVertexPositions,
+				gridVertexCounts,
+				meshVertexIds,
+				row + 1,
+				col,
+				row + 1,
+				col + 1,
+				grid);
+		}
+	}
+
+	return em;
 }
 
 int moldCheck(
@@ -897,7 +1126,7 @@ int moldCheck(
 	});
 
 	ConnectedComponentData largestComponent =
-		largestConnectedRemainingComponent(
+		largestConnectedComponent(
 			cells, clampedCells, grid, EPS);
 
 
@@ -970,6 +1199,10 @@ int moldCheck(
 
 		const TriMesh moldSurfaceMesh = createMoldSurface(clampedCells, grid, direction);
 
+		const EdgeMesh perimeterSegments =
+			createPerimeterSegments(
+				largestComponent.indices, clampedCells, grid);
+
 		
 		const std::string base = std::string(VCLIB_EXTERNAL_RESULTS_PATH) + "/888_mold_check";
 		saveMesh(hitPointsMesh, base + "_hit_points.ply");
@@ -983,6 +1216,7 @@ int moldCheck(
 		saveMesh(segmentsRemainingMold, base + "_remaining_mold_segments.ply");
 		saveMesh(moldSurfaceMesh, base + "_mold_surface.ply");
 		saveMesh(largestComponentMesh, base + "_largest_component_points.ply");
+		saveMesh(perimeterSegments, base + "_largest_component_perimeter.ply");
 		
 		std::cout << "Clamped points: " << clampedPointsMesh.vertexCount() << "\n";
 		std::cout << "Mold surface median points: " << moldSurfaceMesh.vertexCount() << "\n";
@@ -990,6 +1224,10 @@ int moldCheck(
 				  << largestComponent.indices.size() << "\n";
 		std::cout << "Largest component area: "
 				  << largestComponent.area << "\n";
+		std::cout << "Largest component perimeter: "
+				  << largestComponent.perimeter << "\n";
+		std::cout << "Largest component compactness: "
+				  << largestComponent.compactness << "\n";	
 		std::cout << "Saved debug meshes:\n"
 				<< " - " << base << "_hit_points.ply\n"
 				<< " - " << base << "_clamped_only_points.ply\n"
@@ -1001,7 +1239,8 @@ int moldCheck(
 				<< " - " << base << "_remaining_mold.ply\n"
 				<< " - " << base << "_remaining_mold_segments.ply\n"
 				<< " - " << base << "_mold_surface.ply\n"
-				<< " - " << base << "_largest_component_points.ply\n";
+				<< " - " << base << "_largest_component_points.ply\n"
+				<< " - " << base << "_largest_component_perimeter.ply\n";
 
 		std::cout << "=== moldCheck completed successfully ===\n";
 		std::cout.flush();
@@ -1016,7 +1255,7 @@ int main()
 
 	const auto startTime = std::chrono::steady_clock::now();
 
-	const uint NUM_PLANES = 10;
+	const uint NUM_PLANES = 100;
 
 	std::vector<Point3d> fibNormals = sphericalFibonacciPointSet<Point3d>(NUM_PLANES);
 
@@ -1054,5 +1293,5 @@ int main()
     const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);
     std::cout << "moldCheck execution time: " << elapsedMs.count() << " ms\n";
     std::cout.flush();
-    return bestResult;
+    return 0;
 }
