@@ -23,6 +23,9 @@
 #include <vclib/embree/scene.h>
 #include <vclib/io.h>
 #include <vclib/meshes.h>
+#include <vclib/algorithms/core/fibonacci.h>
+
+
 
 #include <chrono>
 #include <cmath>
@@ -54,6 +57,12 @@ struct CellData
 	vcl::Point3d hitPoint;
 	bool hasHit = false;
 	};
+
+struct ConnectedComponentData
+{
+	std::vector<vcl::uint> indices;
+	double area = 0.0;
+};
 
 //MAKE PLANE
 static std::tuple<vcl::Point3d, vcl::Point3d> makePlane(
@@ -509,6 +518,170 @@ static void validateClampedCells(
 	std::cout.flush();
 }
 
+static bool isSameDistanceCell(
+	const std::vector<CellData>& cells,
+	const std::vector<CellData>& clampedCells,
+	vcl::uint idx,
+	double eps)
+{
+	return cells[idx].hasHit &&
+		   clampedCells[idx].hasHit &&
+		   std::abs(cells[idx].distance - clampedCells[idx].distance) <= eps;
+}
+
+static void pushNeighbor(
+	std::vector<vcl::uint>& stack,
+	std::vector<bool>& visited,
+	const std::vector<CellData>& cells,
+	const std::vector<CellData>& clampedCells,
+	vcl::uint neighbor,
+	double eps)
+{
+	if (!visited[neighbor] &&
+		isSameDistanceCell(cells, clampedCells, neighbor, eps)) {
+		visited[neighbor] = true;
+		stack.push_back(neighbor);
+	}
+}
+
+static ConnectedComponentData largestConnectedRemainingComponent(
+	const std::vector<CellData>& cells,
+	const std::vector<CellData>& clampedCells,
+	const GridChoice& grid,
+	double eps)
+{
+	using namespace vcl;
+
+	ConnectedComponentData result;
+
+	if (cells.size() != clampedCells.size() ||
+		cells.size() != grid.rows * grid.cols) {
+		return result;
+	}
+
+	std::vector<bool> visited(cells.size(), false);
+
+	//BFS
+
+	for (uint start = 0; start < cells.size(); ++start) {
+		if (visited[start] ||
+			!isSameDistanceCell(cells, clampedCells, start, eps)) {
+			continue;
+		}
+
+		std::vector<uint> component;
+		std::vector<uint> stack;
+
+		visited[start] = true;
+		stack.push_back(start);
+
+		while (!stack.empty()) {
+			const uint idx = stack.back();
+			stack.pop_back();
+			component.push_back(idx);
+
+			const uint row = idx / grid.cols;
+			const uint col = idx % grid.cols;
+
+			if (col > 0) {
+				const uint neighbor = idx - 1;
+				pushNeighbor(
+					stack, visited, cells, clampedCells, neighbor, eps);
+			}
+			if (col + 1 < grid.cols) {
+				const uint neighbor = idx + 1;
+				pushNeighbor(
+					stack, visited, cells, clampedCells, neighbor, eps);
+			}
+			if (row > 0) {
+				const uint neighbor = idx - grid.cols;
+				pushNeighbor(
+					stack, visited, cells, clampedCells, neighbor, eps);
+			}
+			if (row + 1 < grid.rows) {
+				const uint neighbor = idx + grid.cols;
+				pushNeighbor(
+					stack, visited, cells, clampedCells, neighbor, eps);
+			}
+		}
+
+		if (component.size() > result.indices.size()) {
+			result.indices = std::move(component);
+		}
+	}
+
+	for (uint idx : result.indices) {
+		result.area += grid.sideU * grid.sideV;
+	}
+
+	return result;
+}
+
+static vcl::TriMesh createMoldSurface(
+	const std::vector<CellData>& clampedCells,
+	const GridChoice& grid,
+	const vcl::Point3d& direction)
+{
+	using namespace vcl;
+
+	vcl::TriMesh tm;
+
+	for (uint row = 0; row + 1 < grid.rows; row += 1) {
+		for (uint col = 0; col + 1 < grid.cols; col += 1) {
+			const uint c00 = row * grid.cols + col;
+			const uint c10 = c00 + 1;
+			const uint c01 = c00 + grid.cols;
+			const uint c11 = c01 + 1;
+
+			const std::array<const CellData*, 4> cells = {
+				&clampedCells[c00],
+				&clampedCells[c10],
+				&clampedCells[c01],
+				&clampedCells[c11]};
+
+			
+
+			const double averageDistance =
+				(cells[0]->distance +
+				 cells[1]->distance +
+				 cells[2]->distance +
+				 cells[3]->distance) *
+				0.25;
+
+			const Point3d foot =
+				(cells[0]->cellCenter +
+				 cells[1]->cellCenter +
+				 cells[2]->cellCenter +
+				 cells[3]->cellCenter) *
+				0.25;
+
+			const Point3d medianPoint = foot + direction * averageDistance;
+
+			const Point3d p0 = cells[0]->hitPoint;
+			const Point3d p1 = cells[1]->hitPoint;
+			const Point3d p2 = cells[2]->hitPoint;
+			const Point3d p3 = cells[3]->hitPoint;
+
+			const uint v0 = tm.addVertex(p0);
+			const uint v1 = tm.addVertex(p1);
+			const uint v2 = tm.addVertex(p2);
+			const uint v3 = tm.addVertex(p3);
+			const uint vc = tm.addVertex(medianPoint);
+
+			tm.addFace(v0, vc, v1);
+			tm.addFace(v1, vc, v3);
+			tm.addFace(v3, vc, v2);
+			tm.addFace(v2, vc, v0);
+		}
+	}
+
+	
+	
+
+	return tm;
+}
+
+
 //DEBUG PRISM CREATION
 
 static vcl::uint addFaceWithColor(
@@ -723,12 +896,16 @@ int moldCheck(
 		clampedCells[idx] = computeClampedCell(idx, cells, planePoint, direction, CONE_COS_THRESHOLD, EPS);
 	});
 
+	ConnectedComponentData largestComponent =
+		largestConnectedRemainingComponent(
+			cells, clampedCells, grid, EPS);
+
 
 	if (debug) {
-		std::cout << "Validating clamped cells...\n";
-		std::cout.flush();
+		//std::cout << "Validating clamped cells...\n";
+		//std::cout.flush();
 
-		validateClampedCells(clampedCells, allCells, direction, CONE_COS_THRESHOLD, EPS);
+		//validateClampedCells(clampedCells, allCells, direction, CONE_COS_THRESHOLD, EPS);
 		
 		PolyMesh hitPointsMesh;
 		hitPointsMesh.enablePerVertexColor();
@@ -766,7 +943,13 @@ int moldCheck(
 			if (clampedCells[i].hasHit) continue;
 			addColoredPoint(missedPointsMesh, clampedCells[i].hitPoint, Color::Green);
 		}
-		
+
+		PolyMesh largestComponentMesh;
+		largestComponentMesh.enablePerVertexColor();
+		for (uint i : largestComponent.indices) {
+			addColoredPoint(largestComponentMesh, clampedCells[i].hitPoint, Color::Cyan);
+		}
+
 		const TriMesh planeMesh =
 			makeDebugPlaneMesh(grid, planePoint, u, v);
 
@@ -785,6 +968,7 @@ int moldCheck(
 			addSegment(segmentsRemainingMold, clampedCells[i].hitPoint, cells[i].hitPoint);
 		}
 
+		const TriMesh moldSurfaceMesh = createMoldSurface(clampedCells, grid, direction);
 
 		
 		const std::string base = std::string(VCLIB_EXTERNAL_RESULTS_PATH) + "/888_mold_check";
@@ -797,8 +981,15 @@ int moldCheck(
 		saveMesh(ClampedPrismMesh, base + "_clamped_prisms.ply");
 		saveMesh(remainingMoldMesh, base + "_remaining_mold.ply");
 		saveMesh(segmentsRemainingMold, base + "_remaining_mold_segments.ply");
+		saveMesh(moldSurfaceMesh, base + "_mold_surface.ply");
+		saveMesh(largestComponentMesh, base + "_largest_component_points.ply");
 		
 		std::cout << "Clamped points: " << clampedPointsMesh.vertexCount() << "\n";
+		std::cout << "Mold surface median points: " << moldSurfaceMesh.vertexCount() << "\n";
+		std::cout << "Largest component cells: "
+				  << largestComponent.indices.size() << "\n";
+		std::cout << "Largest component area: "
+				  << largestComponent.area << "\n";
 		std::cout << "Saved debug meshes:\n"
 				<< " - " << base << "_hit_points.ply\n"
 				<< " - " << base << "_clamped_only_points.ply\n"
@@ -808,13 +999,15 @@ int moldCheck(
 				<< " - " << base << "_missed_points.ply\n"
 				<< " - " << base << "_clamped_prisms.ply\n"
 				<< " - " << base << "_remaining_mold.ply\n"
-				<< " - " << base << "_remaining_mold_segments.ply\n";
+				<< " - " << base << "_remaining_mold_segments.ply\n"
+				<< " - " << base << "_mold_surface.ply\n"
+				<< " - " << base << "_largest_component_points.ply\n";
 
 		std::cout << "=== moldCheck completed successfully ===\n";
 		std::cout.flush();
     }
         
-    return 0;
+    return largestComponent.indices.size();
 }
 
 int main()
@@ -823,22 +1016,43 @@ int main()
 
 	const auto startTime = std::chrono::steady_clock::now();
 
-	Point3d direction(-0.2124352, 0.564385348, 0.53495349532);
+	const uint NUM_PLANES = 10;
 
-    PolyMesh m = loadMesh<PolyMesh>(VCLIB_EXAMPLE_MESHES_PATH "/bunny_enlarged.ply");
+	std::vector<Point3d> fibNormals = sphericalFibonacciPointSet<Point3d>(NUM_PLANES);
 
-    constexpr bool debug = true;
+
+    PolyMesh m = loadMesh<PolyMesh>(VCLIB_EXAMPLE_MESHES_PATH "/bimba_enlarged.ply");
+
 
     std::vector<double> gridCellSideLengths = {0.4, 0.4};
 
-	const double coneAngleDegrees = 10.0;
+	const double coneAngleDegrees = 5.0;
 
-	const double marginFactor = 0.2;
+	const double marginFactor = 0.1;
 
-    const int result = moldCheck(std::move(m), gridCellSideLengths, debug, direction, coneAngleDegrees, marginFactor);
+	int result = 0;
+
+	int bestResult = 0;
+	int bestDirectionIndex = 0;
+
+	for (const auto& direction : fibNormals) {
+		std::cout << "Processing direction: " << direction << "\n";
+		result = moldCheck(m, gridCellSideLengths, false, direction, coneAngleDegrees, marginFactor);
+		if (result < 0) {
+			break;
+		}
+		if (result > bestResult) {
+			bestResult = result;
+			bestDirectionIndex = &direction - &fibNormals[0];
+			std::cout << "New best result: " << bestResult << " (direction index: " << bestDirectionIndex << ")\n";
+		}
+	}
+
+	result = moldCheck(m, gridCellSideLengths, true, fibNormals[bestDirectionIndex], coneAngleDegrees, marginFactor);
+
     const auto endTime = std::chrono::steady_clock::now();
     const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);
     std::cout << "moldCheck execution time: " << elapsedMs.count() << " ms\n";
     std::cout.flush();
-    return result;
+    return bestResult;
 }
