@@ -171,7 +171,7 @@ static CellData shootRayOnCell(
 	const Point3d invalidPoint =
 		cell.cellCenter + direction * maxDistance;
 
-	auto [faceId, baryCoords, triId] =
+	auto [faceId, baryCoords, triId, hitT] =
 		scene.firstFaceIntersectedByRay(rayOrigin, direction);
 
 	if (faceId != UINT_NULL) {
@@ -193,11 +193,8 @@ static CellData shootRayOnCell(
 				p1 * baryCoords.y() +
 				p2 * baryCoords.z();
 
-			const double distance =
-				std::abs((hitPoint - planePoint).dot(direction));
-
 			CellData result = cell;
-			result.distance = distance;
+			result.distance = hitT;
 			result.hitPoint = hitPoint;
 			result.hasHit = true;
 
