@@ -29,6 +29,7 @@
 
 #include <chrono>
 #include <cmath>
+#include <filesystem>
 #include <limits>
 #include <numeric>
 #include <unordered_set>
@@ -796,92 +797,6 @@ static void addSegment(
 	em.addEdge(va, vb);
 }
 
-static void addSegment(
-	vcl::EdgeMesh& em,
-	vcl::uint va,
-	vcl::uint vb)
-{
-	em.addEdge(va, vb);
-}
-
-static vcl::uint gridVertexIndex(
-	vcl::uint row,
-	vcl::uint col,
-	const GridChoice& grid)
-{
-	return row * (grid.cols + 1) + col;
-}
-
-static void accumulateGridCorner(
-	std::vector<vcl::Point3d>& gridVertexPositions,
-	std::vector<vcl::uint>& gridVertexCounts,
-	vcl::uint row,
-	vcl::uint col,
-	const GridChoice& grid,
-	const vcl::Point3d& point)
-{
-	const vcl::uint vertexIndex = gridVertexIndex(row, col, grid);
-	gridVertexPositions[vertexIndex] += point;
-	++gridVertexCounts[vertexIndex];
-}
-
-static vcl::uint meshVertexId(
-	vcl::EdgeMesh& em,
-	const std::vector<vcl::Point3d>& gridVertexPositions,
-	const std::vector<vcl::uint>& gridVertexCounts,
-	std::vector<vcl::uint>& meshVertexIds,
-	vcl::uint row,
-	vcl::uint col,
-	const GridChoice& grid)
-{
-	const vcl::uint vertexIndex = gridVertexIndex(row, col, grid);
-
-	if (meshVertexIds[vertexIndex] != vcl::UINT_NULL) {
-		return meshVertexIds[vertexIndex];
-	}
-
-	vcl::Point3d point = gridVertexPositions[vertexIndex];
-
-	if (gridVertexCounts[vertexIndex] > 0) {
-		point /= gridVertexCounts[vertexIndex];
-	}
-
-	meshVertexIds[vertexIndex] = em.addVertex(point);
-	return meshVertexIds[vertexIndex];
-}
-
-static void addGridSegment(
-	vcl::EdgeMesh& em,
-	const std::vector<vcl::Point3d>& gridVertexPositions,
-	const std::vector<vcl::uint>& gridVertexCounts,
-	std::vector<vcl::uint>& meshVertexIds,
-	vcl::uint row0,
-	vcl::uint col0,
-	vcl::uint row1,
-	vcl::uint col1,
-	const GridChoice& grid)
-{
-	const vcl::uint va = meshVertexId(
-		em,
-		gridVertexPositions,
-		gridVertexCounts,
-		meshVertexIds,
-		row0,
-		col0,
-		grid);
-
-	const vcl::uint vb = meshVertexId(
-		em,
-		gridVertexPositions,
-		gridVertexCounts,
-		meshVertexIds,
-		row1,
-		col1,
-		grid);
-
-	addSegment(em, va, vb);
-}
-
 //DEBUG COLOR POINT CREATION
 
 static void addColoredPoint(
@@ -941,96 +856,23 @@ vcl::EdgeMesh createPerimeterSegments(
 	EdgeMesh em;
 
 	std::unordered_set<uint> componentSet(componentIndices.begin(), componentIndices.end());
-	std::vector<Point3d> gridVertexPositions((grid.rows + 1) * (grid.cols + 1));
-	std::vector<uint> gridVertexCounts(gridVertexPositions.size(), 0);
-	std::vector<uint> meshVertexIds(gridVertexPositions.size(), UINT_NULL);
 
 	for (uint idx : componentIndices) {
 		const uint row = idx / grid.cols;
 		const uint col = idx % grid.cols;
 		const CellData& cell = cells[idx];
 
-		accumulateGridCorner(
-			gridVertexPositions,
-			gridVertexCounts,
-			row,
-			col,
-			grid,
-			cell.cellCorners[0]);
-		accumulateGridCorner(
-			gridVertexPositions,
-			gridVertexCounts,
-			row,
-			col + 1,
-			grid,
-			cell.cellCorners[1]);
-		accumulateGridCorner(
-			gridVertexPositions,
-			gridVertexCounts,
-			row + 1,
-			col + 1,
-			grid,
-			cell.cellCorners[2]);
-		accumulateGridCorner(
-			gridVertexPositions,
-			gridVertexCounts,
-			row + 1,
-			col,
-			grid,
-			cell.cellCorners[3]);
-	}
-
-	for (uint idx : componentIndices) {
-		const uint row = idx / grid.cols;
-		const uint col = idx % grid.cols;
-
 		if (col == 0 || componentSet.count(idx - 1) == 0) {
-			addGridSegment(
-				em,
-				gridVertexPositions,
-				gridVertexCounts,
-				meshVertexIds,
-				row,
-				col,
-				row + 1,
-				col,
-				grid);
+			addSegment(em, cell.cellCorners[0], cell.cellCorners[3]);
 		}
 		if (col + 1 == grid.cols || componentSet.count(idx + 1) == 0) {
-			addGridSegment(
-				em,
-				gridVertexPositions,
-				gridVertexCounts,
-				meshVertexIds,
-				row,
-				col + 1,
-				row + 1,
-				col + 1,
-				grid);
+			addSegment(em, cell.cellCorners[1], cell.cellCorners[2]);
 		}
 		if (row == 0 || componentSet.count(idx - grid.cols) == 0) {
-			addGridSegment(
-				em,
-				gridVertexPositions,
-				gridVertexCounts,
-				meshVertexIds,
-				row,
-				col,
-				row,
-				col + 1,
-				grid);
+			addSegment(em, cell.cellCorners[0], cell.cellCorners[1]);
 		}
 		if (row + 1 == grid.rows || componentSet.count(idx + grid.cols) == 0) {
-			addGridSegment(
-				em,
-				gridVertexPositions,
-				gridVertexCounts,
-				meshVertexIds,
-				row + 1,
-				col,
-				row + 1,
-				col + 1,
-				grid);
+			addSegment(em, cell.cellCorners[3], cell.cellCorners[2]);
 		}
 	}
 
@@ -1205,6 +1047,7 @@ int moldCheck(
 
 		
 		const std::string base = std::string(VCLIB_EXTERNAL_RESULTS_PATH) + "/888_mold_check";
+		for (const auto& entry : std::filesystem::directory_iterator(VCLIB_EXTERNAL_RESULTS_PATH)) if (entry.is_regular_file() && entry.path().extension() == ".ply") std::filesystem::remove(entry.path());
 		saveMesh(hitPointsMesh, base + "_hit_points.ply");
 		saveMesh(clampedonlyPointsMesh, base + "_clamped_only_points.ply");
 		saveMesh(clampednohitPointsMesh, base + "_clamped_nohit_points.ply");
