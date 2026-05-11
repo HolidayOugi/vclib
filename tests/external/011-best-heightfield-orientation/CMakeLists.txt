@@ -20,10 +20,8 @@
 #* (https://www.mozilla.org/en-US/MPL/2.0/) for more details.                *
 #****************************************************************************/
 
-cmake_minimum_required(VERSION 3.24)
-
 get_filename_component(TEST_NAME ${CMAKE_CURRENT_SOURCE_DIR} NAME)
-project(vclib-test-${TEST_NAME})
+project(vclib-external-test-${TEST_NAME})
 
 set(SOURCES
     main.cpp)
@@ -31,8 +29,14 @@ set(SOURCES
 vclib_add_test(
     ${TEST_NAME}
     MODULE external
+<<<<<<<< HEAD:tests/external/888-mold-check/CMakeLists.txt
     SOURCES ${SOURCES}
     ${HEADER_ONLY_OPTION})
 
 set(TARGET_NAME vclib-external-test-${TEST_NAME})
 target_compile_definitions(${TARGET_NAME} PRIVATE VCL_EMBREE_FORCE_CHUNK_16)
+========
+    SOURCES ${SOURCES})
+
+target_compile_definitions(${PROJECT_NAME} PRIVATE VCL_EMBREE_FORCE_CHUNK_16)
+>>>>>>>> origin/main:tests/external/011-best-heightfield-orientation/CMakeLists.txt
