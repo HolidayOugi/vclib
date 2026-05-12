@@ -55,9 +55,9 @@ static double moldQualityScore(
 	double percentHidden)
 {
 	return
-		0.65 * componentRatio +
-		0.20 * (1 - (percentClamped / 100.0)) +
-		0.15 * (1 - (percentHidden / 100.0));
+		0.50 * componentRatio +
+		0.30 * (1 - (percentClamped / 100.0)) +
+		0.20 * (1 - (percentHidden / 100.0));
 }
 
 MoldCheckMetrics moldCheck(
@@ -66,7 +66,8 @@ MoldCheckMetrics moldCheck(
 	bool                       debug,
 	vcl::Point3d 			   direction,
 	const double 			   coneAngleDegrees,
-	const double 			   marginFactor)
+	const double 			   marginFactor,
+	const std::string&         debugResultsSubdir = "")
 {
 	using namespace vcl;
 
@@ -191,8 +192,8 @@ MoldCheckMetrics moldCheck(
 	
 
 	if (debug) {
-		//std::cout << "Validating clamped cells...\n";
-		//std::cout.flush();
+		std::cout << "Validating clamped cells...\n";
+		std::cout.flush();
 
 		validateClampedCells(clampedCells, allCells, direction, CONE_COS_THRESHOLD, EPS);
 		
@@ -271,8 +272,21 @@ MoldCheckMetrics moldCheck(
 				largestComponent.indices, clampedCells, grid);
 
 		
-		const std::string base = std::string(VCLIB_EXTERNAL_RESULTS_PATH) + "/888_mold_check";
-		for (const auto& entry : std::filesystem::directory_iterator(VCLIB_EXTERNAL_RESULTS_PATH)) if (entry.is_regular_file() && entry.path().extension() == ".ply") std::filesystem::remove(entry.path());
+		const std::filesystem::path debugOutputDir =
+			std::filesystem::path(VCLIB_EXTERNAL_RESULTS_PATH) /
+			debugResultsSubdir;
+
+		std::filesystem::create_directories(debugOutputDir);
+
+		for (const auto& entry :
+			 std::filesystem::directory_iterator(debugOutputDir)) {
+			if (entry.is_regular_file() && entry.path().extension() == ".ply") {
+				std::filesystem::remove(entry.path());
+			}
+		}
+
+		const std::string base =
+			(debugOutputDir / "888_mold_check").string();
 		saveMesh(hitPointsMesh, base + "_hit_points.ply");
 		saveMesh(clampedonlyPointsMesh, base + "_clamped_only_points.ply");
 		saveMesh(clampednohitPointsMesh, base + "_clamped_nohit_points.ply");
@@ -356,24 +370,34 @@ int main()
 
 	MoldCheckMetrics result;
 	MoldCheckMetrics bestResult;
+	MoldCheckMetrics worstResult;
+	worstResult.score = std::numeric_limits<double>::infinity();
 	int bestDirectionIndex = 0;
+	int worstDirectionIndex = 0;
 
 	for (const auto& direction : fibNormals) {
 		std::cout << "Processing direction: " << direction << "\n";
 		result = moldCheck(m, gridCellSideLengths, false, direction, coneAngleDegrees, marginFactor);
+		std::cout << "Score: " << result.score
+					  << " (component ratio: " << result.componentRatio
+					  << ", largest component cells: " << result.largestComponentSize
+					  << ", clamped: " << result.percentClamped << "%"
+					  << ", hidden: " << result.percentHidden << "%)\n";
 		if (result.score > bestResult.score) {
 			bestResult = result;
 			bestDirectionIndex = &direction - &fibNormals[0];
-			std::cout << "New best score: " << bestResult.score
-					  << " (component ratio: " << bestResult.componentRatio
-					  << ", largest component cells: " << bestResult.largestComponentSize
-					  << ", clamped: " << bestResult.percentClamped << "%"
-					  << ", hidden: " << bestResult.percentHidden << "%"
-					  << ", direction index: " << bestDirectionIndex << ")\n";
+			std::cout << ("New best direction found! Index: " + std::to_string(bestDirectionIndex) + ", Score: " + std::to_string(bestResult.score) + "\n");
+		}
+		if (result.score < worstResult.score) {
+			worstResult = result;
+			worstDirectionIndex = &direction - &fibNormals[0];
+			std::cout << ("New worst direction found! Index: " + std::to_string(worstDirectionIndex) + ", Score: " + std::to_string(worstResult.score) + "\n");
 		}
 	}
 
-	result = moldCheck(m, gridCellSideLengths, true, fibNormals[bestDirectionIndex], coneAngleDegrees, marginFactor);
+	result = moldCheck(m, gridCellSideLengths, true, fibNormals[bestDirectionIndex], coneAngleDegrees, marginFactor, "best");
+
+	result = moldCheck(m, gridCellSideLengths, true, fibNormals[worstDirectionIndex], coneAngleDegrees, marginFactor, "worst");
 
     const auto endTime = std::chrono::steady_clock::now();
     const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);

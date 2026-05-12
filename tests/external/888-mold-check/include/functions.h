@@ -119,6 +119,20 @@ static CellData shootRayOnCell(
 	if (faceId != UINT_NULL) {
 		//redoing the first hit might seem redudant but it is actually faster than computing the hit point three times.
 		const auto rayHits = scene.facesIntersectedByRay(rayOrigin, direction, eps);
+
+		//fallback for possible missed hit due to numerical issues in firstFaceIntersectedByRay and silent crash
+		//possible bug to fix
+		if (rayHits.empty()) {
+			CellData result = cell;
+			result.distance = hitT;
+			result.hitPoint = computeHitPoint(m, faceId, triId, baryCoords, invalidPoint);
+			result.thirdHitPoint = result.hitPoint; //to remove
+			result.hasHit = result.hitPoint != invalidPoint;
+			result.hasHiddenHit = false;
+
+			return result;
+		}
+		
 		auto [faceId, baryCoords, triId, hitT] = rayHits.front(); 
 		Point3d hitPoint = computeHitPoint(m, faceId, triId, baryCoords, invalidPoint);
 
@@ -136,12 +150,7 @@ static CellData shootRayOnCell(
 					rayHits[2];
 
 				const Point3d thirdHitPoint =
-					computeHitPoint(
-						m,
-						thirdFaceId,
-						thirdTriId,
-						thirdBaryCoords,
-						result.thirdHitPoint);
+					computeHitPoint(m, thirdFaceId, thirdTriId, thirdBaryCoords, result.thirdHitPoint);
 
 				result.thirdHitPoint = thirdHitPoint;
 			}
