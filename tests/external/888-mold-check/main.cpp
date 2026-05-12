@@ -156,6 +156,40 @@ static void makeGrid(
 
 // SHOOT RAY FROM CELL CENTER
 
+static vcl::Point3d computeHitPoint(
+	const vcl::PolyMesh& m,
+	vcl::uint faceId,
+	vcl::uint triId,
+	const vcl::Point3f& baryCoords,
+	const vcl::Point3d& invalidPoint)
+{
+	using namespace vcl;
+
+	if (faceId == UINT_NULL) {
+		return invalidPoint;
+	}
+
+	const auto& face = m.face(faceId);
+	const std::vector<uint> faceTriangulation = earCut(face);
+
+	if (triId * 3 + 2 >= faceTriangulation.size()) {
+		return invalidPoint;
+	}
+
+	const uint vi0 = faceTriangulation[triId * 3 + 0];
+	const uint vi1 = faceTriangulation[triId * 3 + 1];
+	const uint vi2 = faceTriangulation[triId * 3 + 2];
+
+	const Point3d& p0 = face.vertex(vi0)->position();
+	const Point3d& p1 = face.vertex(vi1)->position();
+	const Point3d& p2 = face.vertex(vi2)->position();
+
+	return
+		p0 * baryCoords.x() +
+		p1 * baryCoords.y() +
+		p2 * baryCoords.z();
+}
+
 static CellData shootRayOnCell(
 	const CellData& cell,
 	const vcl::PolyMesh& m,
@@ -163,7 +197,7 @@ static CellData shootRayOnCell(
 	const vcl::Point3d& planePoint,
 	const vcl::Point3d& direction,
 	double maxDistance,
-	double eps)
+	float eps)
 {
 	using namespace vcl;
 
@@ -173,77 +207,45 @@ static CellData shootRayOnCell(
 	const Point3d invalidPoint =
 		cell.cellCenter + direction * maxDistance;
 
-	const auto rayHits =
-		scene.facesIntersectedByRay(
-			rayOrigin,
-			direction);
+	//noticeably faster to use firstFaceIntersectedbyRay and then recast multiple
+	//rays only on non-empty cells than to use facesIntersectedByRay directly for all cells
+	auto [faceId, baryCoords, triId, hitT] =
+		scene.firstFaceIntersectedByRay(rayOrigin, direction);
 
-	if (!rayHits.empty()) {
-		auto [faceId, baryCoords, triId, hitT] = rayHits.front();
+	if (faceId != UINT_NULL) {
 
-		if (faceId != UINT_NULL) {
-			const auto& face = m.face(faceId);
+		//redoing the first hit might seem redudant but it is actually faster than computing the hit point three times.
 
-			std::vector<uint> faceTriangulation = earCut(face);
+		const auto rayHits = scene.facesIntersectedByRay(rayOrigin, direction, eps);
+		auto [faceId, baryCoords, triId, hitT] = rayHits.front(); 
+		Point3d hitPoint = computeHitPoint(m, faceId, triId, baryCoords, invalidPoint);
 
-			if (triId * 3 + 2 < faceTriangulation.size()) {
-				const uint vi0 = faceTriangulation[triId * 3 + 0];
-				const uint vi1 = faceTriangulation[triId * 3 + 1];
-				const uint vi2 = faceTriangulation[triId * 3 + 2];
-
-				const Point3d& p0 = face.vertex(vi0)->position();
-				const Point3d& p1 = face.vertex(vi1)->position();
-				const Point3d& p2 = face.vertex(vi2)->position();
-
-				const Point3d hitPoint =
-					p0 * baryCoords.x() +
-					p1 * baryCoords.y() +
-					p2 * baryCoords.z();
-
-				CellData result = cell;
-				result.distance = hitT;
-				result.hitPoint = hitPoint;
-				result.thirdHitPoint = hitPoint; //to remove
-				result.hasHit = true;
-				result.hasHiddenHit = rayHits.size() > 2;
+		if (hitPoint != invalidPoint) {
+			CellData result = cell;
+			result.distance = hitT;
+			result.hitPoint = hitPoint;
+			result.thirdHitPoint = hitPoint; //to remove
+			result.hasHit = true;
+			result.hasHiddenHit = rayHits.size() > 2;
 				
-				//to remove
-				if (result.hasHiddenHit) {
-					auto [thirdFaceId, thirdBaryCoords, thirdTriId, thirdHitT] =
-						rayHits[2];
+			//to remove
+			if (result.hasHiddenHit) {
+				auto [thirdFaceId, thirdBaryCoords, thirdTriId, thirdHitT] =
+					rayHits[2];
 
-					if (thirdFaceId != UINT_NULL) {
-						const auto& thirdFace = m.face(thirdFaceId);
+				const Point3d thirdHitPoint =
+					computeHitPoint(
+						m,
+						thirdFaceId,
+						thirdTriId,
+						thirdBaryCoords,
+						result.thirdHitPoint);
 
-						std::vector<uint> thirdFaceTriangulation =
-							earCut(thirdFace);
-
-						if (thirdTriId * 3 + 2 <
-							thirdFaceTriangulation.size()) {
-							const uint vi0 =
-								thirdFaceTriangulation[thirdTriId * 3 + 0];
-							const uint vi1 =
-								thirdFaceTriangulation[thirdTriId * 3 + 1];
-							const uint vi2 =
-								thirdFaceTriangulation[thirdTriId * 3 + 2];
-
-							const Point3d& p0 =
-								thirdFace.vertex(vi0)->position();
-							const Point3d& p1 =
-								thirdFace.vertex(vi1)->position();
-							const Point3d& p2 =
-								thirdFace.vertex(vi2)->position();
-
-							result.thirdHitPoint =
-								p0 * thirdBaryCoords.x() +
-								p1 * thirdBaryCoords.y() +
-								p2 * thirdBaryCoords.z();
-						}
-					}
-				}
-
-				return result;
+				result.thirdHitPoint = thirdHitPoint;
 			}
+
+			return result;
+
 		}
 	}
 
@@ -306,7 +308,7 @@ static bool isWithinPlaneAngle(
 	const vcl::Point3d& other,
 	const vcl::Point3d& direction,
 	double coneCosThreshold,
-	double eps)
+	float eps)
 {	
 
 	using namespace vcl;
@@ -334,7 +336,7 @@ static double coneBoundaryStep(
 	const vcl::Point3d& b,
 	const vcl::Point3d& direction,
 	double coneCosThreshold,
-	double eps)
+	float eps)
 {
 
 	using namespace vcl;
@@ -459,7 +461,7 @@ static CellData computeClampedCell(
 	const vcl::Point3d& planePoint,
 	const vcl::Point3d& direction,
 	double coneCosThreshold,
-	double eps)
+	float eps)
 {
 	using namespace vcl;
 
@@ -523,7 +525,7 @@ static void validateClampedCells(
 	const std::vector<vcl::uint>& allCells,
 	const vcl::Point3d& direction,
 	double coneCosThreshold,
-	double eps)
+	float eps)
 {
 
 	using namespace vcl;
@@ -574,7 +576,7 @@ static bool isSameDistanceCell(
 	const std::vector<CellData>& cells,
 	const std::vector<CellData>& clampedCells,
 	vcl::uint idx,
-	double eps)
+	float eps)
 {
 	return cells[idx].hasHit &&
 		   clampedCells[idx].hasHit &&
@@ -587,7 +589,7 @@ static void pushNeighbor(
 	const std::vector<CellData>& cells,
 	const std::vector<CellData>& clampedCells,
 	vcl::uint neighbor,
-	double eps)
+	float eps)
 {
 	if (!visited[neighbor] &&
 		isSameDistanceCell(cells, clampedCells, neighbor, eps)) {
@@ -631,7 +633,7 @@ static ConnectedComponentData largestConnectedComponent(
 	const std::vector<CellData>& cells,
 	const std::vector<CellData>& clampedCells,
 	const GridChoice& grid,
-	double eps)
+	float eps)
 {
 	using namespace vcl;
 
@@ -947,7 +949,8 @@ int moldCheck(
     updateBoundingBox(m);
 
 	const double MAX_DISTANCE = m.boundingBox().diagonal();
-	const double EPS = 1e-12 * MAX_DISTANCE;
+	const float EPS = 1e-12f * MAX_DISTANCE;
+	const float RAY_EPS = 1e-6f * MAX_DISTANCE;
 
     embree::Scene scene(m);
 
@@ -991,7 +994,7 @@ int moldCheck(
 
 	parallelFor(allCells, [&](uint idx) {
 		const CellData cell = makeCellGeometry(idx, grid, planePoint, u, v);
-		cells[idx] = shootRayOnCell(cell, m, scene, planePoint, direction, MAX_DISTANCE, EPS);
+		cells[idx] = shootRayOnCell(cell, m, scene, planePoint, direction, MAX_DISTANCE, RAY_EPS);
 	});
 
     std::vector<CellData> clampedCells = cells;
