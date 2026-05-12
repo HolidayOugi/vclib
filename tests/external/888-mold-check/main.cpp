@@ -57,7 +57,9 @@ struct CellData
 	vcl::Point3d cellCenter;
 	double distance;
 	vcl::Point3d hitPoint;
+	vcl::Point3d thirdHitPoint;
 	bool hasHit = false;
+	bool hasHiddenHit = false;
 	};
 
 struct ConnectedComponentData
@@ -171,41 +173,86 @@ static CellData shootRayOnCell(
 	const Point3d invalidPoint =
 		cell.cellCenter + direction * maxDistance;
 
-	auto [faceId, baryCoords, triId, hitT] =
-		scene.firstFaceIntersectedByRay(rayOrigin, direction);
+	const auto rayHits =
+		scene.facesIntersectedByRay(
+			rayOrigin,
+			direction);
 
-	if (faceId != UINT_NULL) {
-		const auto& face = m.face(faceId);
+	if (!rayHits.empty()) {
+		auto [faceId, baryCoords, triId, hitT] = rayHits.front();
 
-		std::vector<uint> faceTriangulation = earCut(face);
+		if (faceId != UINT_NULL) {
+			const auto& face = m.face(faceId);
 
-		if (triId * 3 + 2 < faceTriangulation.size()) {
-			const uint vi0 = faceTriangulation[triId * 3 + 0];
-			const uint vi1 = faceTriangulation[triId * 3 + 1];
-			const uint vi2 = faceTriangulation[triId * 3 + 2];
+			std::vector<uint> faceTriangulation = earCut(face);
 
-			const Point3d& p0 = face.vertex(vi0)->position();
-			const Point3d& p1 = face.vertex(vi1)->position();
-			const Point3d& p2 = face.vertex(vi2)->position();
+			if (triId * 3 + 2 < faceTriangulation.size()) {
+				const uint vi0 = faceTriangulation[triId * 3 + 0];
+				const uint vi1 = faceTriangulation[triId * 3 + 1];
+				const uint vi2 = faceTriangulation[triId * 3 + 2];
 
-			const Point3d hitPoint =
-				p0 * baryCoords.x() +
-				p1 * baryCoords.y() +
-				p2 * baryCoords.z();
+				const Point3d& p0 = face.vertex(vi0)->position();
+				const Point3d& p1 = face.vertex(vi1)->position();
+				const Point3d& p2 = face.vertex(vi2)->position();
 
-			CellData result = cell;
-			result.distance = hitT;
-			result.hitPoint = hitPoint;
-			result.hasHit = true;
+				const Point3d hitPoint =
+					p0 * baryCoords.x() +
+					p1 * baryCoords.y() +
+					p2 * baryCoords.z();
 
-			return result;
+				CellData result = cell;
+				result.distance = hitT;
+				result.hitPoint = hitPoint;
+				result.thirdHitPoint = hitPoint; //to remove
+				result.hasHit = true;
+				result.hasHiddenHit = rayHits.size() > 2;
+				
+				//to remove
+				if (result.hasHiddenHit) {
+					auto [thirdFaceId, thirdBaryCoords, thirdTriId, thirdHitT] =
+						rayHits[2];
+
+					if (thirdFaceId != UINT_NULL) {
+						const auto& thirdFace = m.face(thirdFaceId);
+
+						std::vector<uint> thirdFaceTriangulation =
+							earCut(thirdFace);
+
+						if (thirdTriId * 3 + 2 <
+							thirdFaceTriangulation.size()) {
+							const uint vi0 =
+								thirdFaceTriangulation[thirdTriId * 3 + 0];
+							const uint vi1 =
+								thirdFaceTriangulation[thirdTriId * 3 + 1];
+							const uint vi2 =
+								thirdFaceTriangulation[thirdTriId * 3 + 2];
+
+							const Point3d& p0 =
+								thirdFace.vertex(vi0)->position();
+							const Point3d& p1 =
+								thirdFace.vertex(vi1)->position();
+							const Point3d& p2 =
+								thirdFace.vertex(vi2)->position();
+
+							result.thirdHitPoint =
+								p0 * thirdBaryCoords.x() +
+								p1 * thirdBaryCoords.y() +
+								p2 * thirdBaryCoords.z();
+						}
+					}
+				}
+
+				return result;
+			}
 		}
 	}
 
 	CellData result = cell;
 	result.distance = maxDistance;
 	result.hitPoint = invalidPoint;
+	result.thirdHitPoint = invalidPoint;
 	result.hasHit = false;
+	result.hasHiddenHit = false;
 
 	return result;
 }
@@ -245,7 +292,9 @@ static CellData makeCellGeometry(
 
 	cell.distance = 0.0;
 	cell.hitPoint = cell.cellCenter;
+	cell.thirdHitPoint = cell.cellCenter;
 	cell.hasHit = false;
+	cell.hasHiddenHit = false;
 
 	return cell;
 }
@@ -462,7 +511,9 @@ static CellData computeClampedCell(
 		baseCell.cellCenter,
 		distanceToPlane,
 		currentPoint,
-		true};
+		baseCell.thirdHitPoint,
+		true,
+		baseCell.hasHiddenHit};
 }
 
 //VALIDATION
@@ -964,16 +1015,42 @@ int moldCheck(
 		clampedCells[idx] = computeClampedCell(idx, cells, planePoint, direction, CONE_COS_THRESHOLD, EPS);
 	});
 
+	double totalAreaHit = 0.0;
+	double clampedAreaHit = 0.0;
+	double hiddenAreaHit = 0.0;
+
+	for (uint i = 0; i < cells.size(); ++i) {
+		if (!cells[i].hasHit) {
+			continue;
+		}
+
+		totalAreaHit += cellArea;
+
+		if (clampedCells[i].distance != cells[i].distance) {
+			clampedAreaHit += cellArea;
+		}
+
+		if (cells[i].hasHiddenHit) {
+			hiddenAreaHit += cellArea;
+		}
+	}
+
+	const double percentClamped =
+		(totalAreaHit > 0.0) ? (clampedAreaHit / totalAreaHit) * 100.0 : 0.0;
+	const double percentHidden =
+		(totalAreaHit > 0.0) ? (hiddenAreaHit / totalAreaHit) * 100.0 : 0.0;
+
 	ConnectedComponentData largestComponent =
 		largestConnectedComponent(
 			cells, clampedCells, grid, EPS);
 
+	
 
 	if (debug) {
 		//std::cout << "Validating clamped cells...\n";
 		//std::cout.flush();
 
-		//validateClampedCells(clampedCells, allCells, direction, CONE_COS_THRESHOLD, EPS);
+		validateClampedCells(clampedCells, allCells, direction, CONE_COS_THRESHOLD, EPS);
 		
 		PolyMesh hitPointsMesh;
 		hitPointsMesh.enablePerVertexColor();
@@ -1003,6 +1080,13 @@ int moldCheck(
 		for (uint i = 0; i < clampedCells.size(); ++i) {
 			if (!clampedCells[i].hasHit) continue;
 			addColoredPoint(clampedPointsMesh, clampedCells[i].hitPoint, Color::Blue);
+		}
+
+		PolyMesh thirdHitPointsMesh;
+		thirdHitPointsMesh.enablePerVertexColor();
+		for (uint i = 0; i < cells.size(); ++i) {
+			if (!cells[i].hasHiddenHit) continue;
+			addColoredPoint(thirdHitPointsMesh, cells[i].thirdHitPoint, Color::Magenta);
 		}
 		
 		PolyMesh missedPointsMesh;
@@ -1049,6 +1133,7 @@ int moldCheck(
 		saveMesh(clampedonlyPointsMesh, base + "_clamped_only_points.ply");
 		saveMesh(clampednohitPointsMesh, base + "_clamped_nohit_points.ply");
 		saveMesh(clampedPointsMesh, base + "_all_clamped_points.ply");
+		saveMesh(thirdHitPointsMesh, base + "_third_hit_points.ply");
 		saveMesh(planeMesh, base + "_plane.ply");
 		saveMesh(missedPointsMesh, base + "_missed_points.ply");
 		saveMesh(ClampedPrismMesh, base + "_clamped_prisms.ply");
@@ -1059,6 +1144,7 @@ int moldCheck(
 		saveMesh(perimeterSegments, base + "_largest_component_perimeter.ply");
 		
 		std::cout << "Clamped points: " << clampedPointsMesh.vertexCount() << "\n";
+		std::cout << "Third hit points: " << thirdHitPointsMesh.vertexCount() << "\n";
 		std::cout << "Mold surface median points: " << moldSurfaceMesh.vertexCount() << "\n";
 		std::cout << "Largest component cells: "
 				  << largestComponent.indices.size() << "\n";
@@ -1067,12 +1153,23 @@ int moldCheck(
 		std::cout << "Largest component perimeter: "
 				  << largestComponent.perimeter << "\n";
 		std::cout << "Largest component compactness: "
-				  << largestComponent.compactness << "\n";	
+				  << largestComponent.compactness << "\n";
+		std::cout << "TotalAreaHit: "
+				  << totalAreaHit << "\n";
+		std::cout << "ClampedAreaHit: "
+				  << clampedAreaHit << "\n";
+		std::cout << "percentClamped: "
+				  << percentClamped << "\n";
+		std::cout << "hiddenAreaHit: "
+				  << hiddenAreaHit << "\n";
+		std::cout << "percentHidden: "
+				  << percentHidden << "\n";
 		std::cout << "Saved debug meshes:\n"
 				<< " - " << base << "_hit_points.ply\n"
 				<< " - " << base << "_clamped_only_points.ply\n"
 				<< " - " << base << "_clamped_nohit_points.ply\n"
 				<< " - " << base << "_all_clamped_points.ply\n"
+				<< " - " << base << "_third_hit_points.ply\n"
 				<< " - " << base << "_plane.ply\n"
 				<< " - " << base << "_missed_points.ply\n"
 				<< " - " << base << "_clamped_prisms.ply\n"
@@ -1095,7 +1192,7 @@ int main()
 
 	const auto startTime = std::chrono::steady_clock::now();
 
-	const uint NUM_PLANES = 100;
+	const uint NUM_PLANES = 10;
 
 	std::vector<Point3d> fibNormals = sphericalFibonacciPointSet<Point3d>(NUM_PLANES);
 
@@ -1103,7 +1200,7 @@ int main()
     PolyMesh m = loadMesh<PolyMesh>(VCLIB_EXAMPLE_MESHES_PATH "/bimba_enlarged.ply");
 
 
-    std::vector<double> gridCellSideLengths = {0.4, 0.4};
+    std::vector<double> gridCellSideLengths = {0.3, 0.3};
 
 	const double coneAngleDegrees = 5.0;
 
