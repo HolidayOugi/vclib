@@ -228,7 +228,11 @@ MoldCheckMetrics moldCheck(
 
 	if (outRemainingMoldMesh != nullptr) {
 		*outRemainingMoldMesh =
-			createRemainingMold(cells, clampedCells, moldClampedCells, grid);
+			createRemainingMold(
+				cells,
+				clampedCells,
+				moldClampedCells,
+				direction);
 	}
 
 	
@@ -239,170 +243,25 @@ MoldCheckMetrics moldCheck(
 
 		validateClampedCells(clampedCells, allCells, direction, CONE_COS_THRESHOLD, EPS);
 		
-		PolyMesh hitPointsMesh;
-		hitPointsMesh.enablePerVertexColor();
-		for (uint i = 0; i < cells.size(); ++i) {
-			if (!cells[i].hasHit) continue;
-			addColoredPoint(hitPointsMesh, cells[i].hitPoint, Color::Yellow);
-		}
-		
-		PolyMesh clampedonlyPointsMesh;
-		clampedonlyPointsMesh.enablePerVertexColor();
-		for (uint i = 0; i < clampedCells.size(); ++i) {
-			if (!cells[i].hasHit) continue;
-			if (cells[i].distance == clampedCells[i].distance) continue;
-			addColoredPoint(clampedonlyPointsMesh, clampedCells[i].hitPoint, Color::Red);
-		}
-		
-		PolyMesh clampednohitPointsMesh;
-		clampednohitPointsMesh.enablePerVertexColor();
-		for (uint i = 0; i < clampedCells.size(); ++i) {
-			if (cells[i].hasHit) continue;
-			if (cells[i].distance == clampedCells[i].distance) continue;
-			addColoredPoint(clampednohitPointsMesh, clampedCells[i].hitPoint, Color::White);
-		}
-		
-		PolyMesh clampedPointsMesh;
-		clampedPointsMesh.enablePerVertexColor();
-		for (uint i = 0; i < clampedCells.size(); ++i) {
-			addColoredPoint(clampedPointsMesh, clampedCells[i].hitPoint, Color::Blue);
-		}
-
-		PolyMesh moldClampedPointsMesh;
-		moldClampedPointsMesh.enablePerVertexColor();
-		for (uint i = 0; i < moldClampedCells.size(); ++i) {
-			if (!moldClampedCells[i].hasHit) continue;
-			addColoredPoint(moldClampedPointsMesh, moldClampedCells[i].hitPoint, Color::Cyan);
-		}
-
-		PolyMesh thirdHitPointsMesh;
-		thirdHitPointsMesh.enablePerVertexColor();
-		for (uint i = 0; i < cells.size(); ++i) {
-			if (!cells[i].hasHiddenHit) continue;
-			addColoredPoint(thirdHitPointsMesh, cells[i].thirdHitPoint, Color::Magenta);
-		}
-
-		PolyMesh lastHitPointsMesh;
-		lastHitPointsMesh.enablePerVertexColor();
-		for (uint i = 0; i < cells.size(); ++i) {
-			if (!cells[i].hasHit) continue;
-			addColoredPoint(lastHitPointsMesh, cells[i].lastHitPoint, Color::Green);
-		}
-		
-		PolyMesh missedPointsMesh;
-		missedPointsMesh.enablePerVertexColor();
-		for (uint i = 0; i < clampedCells.size(); ++i) {
-			if (clampedCells[i].hasHit) continue;
-			addColoredPoint(missedPointsMesh, clampedCells[i].hitPoint, Color::Green);
-		}
-
-		PolyMesh largestComponentMesh;
-		largestComponentMesh.enablePerVertexColor();
-		for (uint i : largestComponent.indices) {
-			addColoredPoint(largestComponentMesh, clampedCells[i].hitPoint, Color::Cyan);
-		}
-
-		const TriMesh planeMesh =
-			makeDebugPlaneMesh(grid, planePoint, u, v);
-
-		TriMesh ClampedPrismMesh;
-		for (uint i = 0; i < clampedCells.size(); ++i) {
-			if (!clampedCells[i].hasHit) continue;
-			addQuadPrism(ClampedPrismMesh, clampedCells[i].cellCorners, -EPS, clampedCells[i].distance, direction, vcl::Color::White);
-		}
-		
-		TriMesh remainingMoldMesh;
-		EdgeMesh segmentsRemainingMold;
-		for (uint i = 0; i < clampedCells.size(); ++i) {
-			if (!cells[i].hasHit) continue;
-			if (cells[i].distance == clampedCells[i].distance) continue;
-			addQuadPrism(remainingMoldMesh, clampedCells[i].cellCorners, clampedCells[i].distance, cells[i].distance, direction, vcl::Color::Red);
-			addSegment(segmentsRemainingMold, clampedCells[i].hitPoint, cells[i].hitPoint);
-		}
-
-		const TriMesh moldSurfaceMesh = createMoldSurface(clampedCells, grid, direction);
-
-		const EdgeMesh perimeterSegments =
-			createPerimeterSegments(
-				largestComponent.indices, clampedCells, grid);
-
-		
-		const std::filesystem::path debugOutputDir =
-			std::filesystem::path(VCLIB_EXTERNAL_RESULTS_PATH) /
-			debugResultsSubdir;
-
-		std::filesystem::create_directories(debugOutputDir);
-
-		for (const auto& entry :
-			 std::filesystem::directory_iterator(debugOutputDir)) {
-			if (entry.is_regular_file() && entry.path().extension() == ".ply") {
-				std::filesystem::remove(entry.path());
-			}
-		}
-
-		const std::string base =
-			(debugOutputDir / "888_mold_check").string();
-		saveMesh(hitPointsMesh, base + "_hit_points.ply");
-		saveMesh(clampedonlyPointsMesh, base + "_clamped_only_points.ply");
-		saveMesh(clampednohitPointsMesh, base + "_clamped_nohit_points.ply");
-		saveMesh(clampedPointsMesh, base + "_all_clamped_points.ply");
-		saveMesh(moldClampedPointsMesh, base + "_mold_clamped_points.ply");
-		saveMesh(thirdHitPointsMesh, base + "_third_hit_points.ply");
-		saveMesh(lastHitPointsMesh, base + "_last_hit_points.ply");
-		saveMesh(planeMesh, base + "_plane.ply");
-		saveMesh(missedPointsMesh, base + "_missed_points.ply");
-		saveMesh(ClampedPrismMesh, base + "_clamped_prisms.ply");
-		saveMesh(remainingMoldMesh, base + "_remaining_mold.ply");
-		saveMesh(segmentsRemainingMold, base + "_remaining_mold_segments.ply");
-		saveMesh(moldSurfaceMesh, base + "_mold_surface.ply");
-		saveMesh(largestComponentMesh, base + "_largest_component_points.ply");
-		saveMesh(perimeterSegments, base + "_largest_component_perimeter.ply");
-		
-		std::cout << "Clamped points: " << clampedPointsMesh.vertexCount() << "\n";
-		std::cout << "Mold clamped points: " << moldClampedPointsMesh.vertexCount() << "\n";
-		std::cout << "Third hit points: " << thirdHitPointsMesh.vertexCount() << "\n";
-		std::cout << "Mold surface median points: " << moldSurfaceMesh.vertexCount() << "\n";
-		std::cout << "Largest component cells: "
-				  << largestComponent.indices.size() << "\n";
-		std::cout << "Largest component area: "
-				  << largestComponent.area << "\n";
-		std::cout << "Largest component perimeter: "
-				  << largestComponent.perimeter << "\n";
-		std::cout << "Largest component compactness: "
-				  << largestComponent.compactness << "\n";
-		std::cout << "TotalAreaHit: "
-				  << totalAreaHit << "\n";
-		std::cout << "ClampedAreaHit: "
-				  << clampedAreaHit << "\n";
-		std::cout << "percentClamped: "
-				  << percentClamped << "\n";
-		std::cout << "hiddenAreaHit: "
-				  << hiddenAreaHit << "\n";
-		std::cout << "percentHidden: "
-				  << percentHidden << "\n";
-		std::cout << "componentRatio: "
-				  << componentRatio << "\n";
-		std::cout << "qualityScore: "
-				  << metrics.score << "\n";
-		std::cout << "Saved debug meshes:\n"
-				<< " - " << base << "_hit_points.ply\n"
-				<< " - " << base << "_clamped_only_points.ply\n"
-				<< " - " << base << "_clamped_nohit_points.ply\n"
-				<< " - " << base << "_all_clamped_points.ply\n"
-				<< " - " << base << "_mold_clamped_points.ply\n"
-				<< " - " << base << "_third_hit_points.ply\n"
-				<< " - " << base << "_last_hit_points.ply\n"
-				<< " - " << base << "_plane.ply\n"
-				<< " - " << base << "_missed_points.ply\n"
-				<< " - " << base << "_clamped_prisms.ply\n"
-				<< " - " << base << "_remaining_mold.ply\n"
-				<< " - " << base << "_remaining_mold_segments.ply\n"
-				<< " - " << base << "_mold_surface.ply\n"
-				<< " - " << base << "_largest_component_points.ply\n"
-				<< " - " << base << "_largest_component_perimeter.ply\n";
-
-		std::cout << "=== moldCheck completed successfully ===\n";
-		std::cout.flush();
+		debugOutput(
+			cells,
+			clampedCells,
+			moldClampedCells,
+			largestComponent,
+			grid,
+			planePoint,
+			u,
+			v,
+			direction,
+			EPS,
+			debugResultsSubdir,
+			totalAreaHit,
+			clampedAreaHit,
+			percentClamped,
+			hiddenAreaHit,
+			percentHidden,
+			componentRatio,
+			metrics.score);
     }
         
     return metrics;
@@ -428,7 +287,7 @@ int main()
 
 	const double marginFactor = 0.1;
 
-	PolyMesh mold = squareMold(m, marginFactor);
+	PolyMesh mold = squareMold(m, 0);
 	const std::filesystem::path externalResultsPath =
 		VCLIB_EXTERNAL_RESULTS_PATH;
 	std::filesystem::create_directories(externalResultsPath);
