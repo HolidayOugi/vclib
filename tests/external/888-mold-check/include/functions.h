@@ -9,6 +9,7 @@
 #include <limits>
 #include <numeric>
 #include <tuple>
+#include <unordered_set>
 #include <vector>
 
 #include <vclib/algorithms/mesh/stat/geometry.h>
@@ -230,58 +231,59 @@ static CellData shootRayOnCell(
 
 	if (faceId != UINT_NULL) {
 		//redoing the first hit might seem redudant but it is actually faster than computing the hit point three times.
-		const auto rayHits = scene.facesIntersectedByRay(rayOrigin, direction, eps);
+		//facesIntersectedbyRay has -eps built in
+		auto rayHits = scene.facesIntersectedByRay(rayOrigin, direction, eps);
+		std::unordered_set<uint> seenFaceIds;
+		rayHits.erase(
+			std::remove_if(
+				rayHits.begin(),
+				rayHits.end(),
+				[&](const auto& rayHit) {
+					const uint hitFaceId = std::get<0>(rayHit);
+					return !seenFaceIds.insert(hitFaceId).second;
+				}),
+			rayHits.end());
 
 		//fallback for possible missed hit due to numerical issues in firstFaceIntersectedByRay and silent crash
 		//possible bug to fix
 		if (rayHits.empty()) {
 			CellData result = cell;
 			result.distance = hitT;
-			result.hitPoint = computeHitPoint(m, faceId, triId, baryCoords, invalidPoint);
-			result.thirdHitPoint = result.hitPoint; //to remove
-			result.hasHit = result.hitPoint != invalidPoint;
-			result.hasHiddenHit = false;
-			result.lastHitPoint = result.hitPoint;
+			result.hitPoints = {
+				computeHitPoint(m, faceId, triId, baryCoords, invalidPoint)};
+			result.hasHit = result.hitPoints[0] != invalidPoint;
 
 			return result;
 		}
 		
 		auto [faceId, baryCoords, triId, hitT] = rayHits.front(); 
 		Point3d hitPoint = computeHitPoint(m, faceId, triId, baryCoords, invalidPoint);
-		auto [lastFaceId, lastBaryCoords, lastTriId, lastHitT] = rayHits.back();
-		Point3d lastHitPoint = computeHitPoint(m, lastFaceId, lastTriId, lastBaryCoords, invalidPoint);
 
 		if (hitPoint != invalidPoint) {
 			CellData result = cell;
 			result.distance = hitT;
-			result.hitPoint = hitPoint;
-			result.thirdHitPoint = hitPoint; //to remove
-			result.lastHitPoint = lastHitPoint;
-			result.hasHit = true;
-			result.hasHiddenHit = rayHits.size() > 2;
-				
-			//to remove
-			if (result.hasHiddenHit) {
-				auto [thirdFaceId, thirdBaryCoords, thirdTriId, thirdHitT] =
-					rayHits[2];
-
-				const Point3d thirdHitPoint =
-					computeHitPoint(m, thirdFaceId, thirdTriId, thirdBaryCoords, result.thirdHitPoint);
-
-				result.thirdHitPoint = thirdHitPoint;
+			result.hitPoints.clear();
+			result.hitPoints.reserve(rayHits.size());
+			for (const auto& rayHit : rayHits) {
+				result.hitPoints.push_back(
+					computeHitPoint(
+						m,
+						std::get<0>(rayHit),
+						std::get<2>(rayHit),
+						std::get<1>(rayHit),
+						invalidPoint));
 			}
+			result.hasHit = true;
 
 			return result;
 		}
+	
 	}
 
 	CellData result = cell;
 	result.distance = maxDistance;
-	result.hitPoint = invalidPoint;
-	result.thirdHitPoint = invalidPoint;
-	result.lastHitPoint = invalidPoint;
+	result.hitPoints = {invalidPoint};
 	result.hasHit = false;
-	result.hasHiddenHit = false;
 
 	return result;
 }
@@ -318,11 +320,8 @@ static CellData makeCellGeometry(
 	cell.cellCenter = planePoint + u * centerU + v * centerV;
 
 	cell.distance = 0.0;
-	cell.hitPoint = cell.cellCenter;
-	cell.thirdHitPoint = cell.cellCenter;
+	cell.hitPoints = {cell.cellCenter};
 	cell.hasHit = false;
-	cell.hasHiddenHit = false;
-	cell.lastHitPoint = cell.cellCenter;
 
 	return cell;
 }
@@ -338,7 +337,7 @@ static CellData computeClampedCell(
 	using namespace vcl;
 
 	const CellData baseCell = cells[i];
-	const Point3d original = baseCell.hitPoint;
+	const Point3d original = baseCell.hitPoints[0];
 
 	double requiredT = 0.0;
 	bool anyCone = false;
@@ -350,7 +349,7 @@ static CellData computeClampedCell(
 
 		if (!isWithinPlaneAngle(
 				original,
-				cells[j].hitPoint,
+				cells[j].hitPoints[0],
 				direction,
 				coneCosThreshold,
 				eps)) {
@@ -361,7 +360,7 @@ static CellData computeClampedCell(
 
 		const double t = coneBoundaryStep(
 			original,
-			cells[j].hitPoint,
+			cells[j].hitPoints[0],
 			direction,
 			coneCosThreshold,
 			eps);
@@ -379,15 +378,11 @@ static CellData computeClampedCell(
 	const double distanceToPlane =
 		std::abs((currentPoint - planePoint).dot(direction));
 
-	return CellData{
-		baseCell.cellCorners,
-		baseCell.cellCenter,
-		distanceToPlane,
-		currentPoint,
-		baseCell.thirdHitPoint,
-		baseCell.lastHitPoint,
-		true,
-		baseCell.hasHiddenHit};
+	CellData result = baseCell;
+	result.distance = distanceToPlane;
+	result.hitPoints[0] = currentPoint;
+	result.hasHit = true;
+	return result;
 }
 
 static ConnectedComponentData largestConnectedComponent(

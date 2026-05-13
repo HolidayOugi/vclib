@@ -167,7 +167,7 @@ MoldCheckMetrics moldCheck(
 			clampedAreaHit += cellArea;
 		}
 
-		if (cells[i].hasHiddenHit) {
+		if (cells[i].hitPoints.size() > 2) {
 			hiddenAreaHit += cellArea;
 		}
 	}
@@ -199,7 +199,7 @@ MoldCheckMetrics moldCheck(
 			if (!moldClampedCells[i].hasHit) continue;
 
 			const Point3d rayOrigin =
-				moldClampedCells[i].hitPoint - direction * RAY_EPS;
+				moldClampedCells[i].hitPoints[0] - direction * RAY_EPS;
 
 			const auto rayHits =
 				moldScene.facesIntersectedByRay(
@@ -215,13 +215,13 @@ MoldCheckMetrics moldCheck(
 			const auto [faceId, baryCoords, triId, hitT] =
 				rayHits.back();
 
-			moldClampedCells[i].hitPoint =
+			moldClampedCells[i].hitPoints = {
 				computeHitPoint(
 					*mold,
 					faceId,
 					triId,
 					baryCoords,
-					moldClampedCells[i].hitPoint);
+					moldClampedCells[i].hitPoints[0])};
 			moldClampedCells[i].distance = hitT;
 		}
 	}
@@ -287,7 +287,7 @@ int main()
 
 	const double marginFactor = 0.1;
 
-	PolyMesh mold = squareMold(m, 0);
+	PolyMesh mold = squareMold(m, 0.05);
 	const std::filesystem::path externalResultsPath =
 		VCLIB_EXTERNAL_RESULTS_PATH;
 	std::filesystem::create_directories(externalResultsPath);

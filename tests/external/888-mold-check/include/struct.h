@@ -25,11 +25,8 @@ struct CellData
 	std::array<vcl::Point3d, 4> cellCorners;
 	vcl::Point3d cellCenter;
 	double distance;
-	vcl::Point3d hitPoint;
-	vcl::Point3d thirdHitPoint;
-	vcl::Point3d lastHitPoint;
+	std::vector<vcl::Point3d> hitPoints;
 	bool hasHit = false;
-	bool hasHiddenHit = false;
 };
 
 struct ConnectedComponentData
