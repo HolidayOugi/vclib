@@ -67,7 +67,9 @@ MoldCheckMetrics moldCheck(
 	vcl::Point3d 			   direction,
 	const double 			   coneAngleDegrees,
 	const double 			   marginFactor,
-	const std::string&         debugResultsSubdir = "")
+	const std::string&         debugResultsSubdir = "",
+	const vcl::PolyMesh*       mold = nullptr,
+	vcl::TriMesh*              outRemainingMoldMesh = nullptr)
 {
 	using namespace vcl;
 
@@ -189,6 +191,46 @@ MoldCheckMetrics moldCheck(
 		percentClamped,
 		percentHidden};
 
+	std::vector<CellData> moldClampedCells = clampedCells;
+
+	if (mold != nullptr) {
+		embree::Scene moldScene(*mold);
+		for (uint i = 0; i < moldClampedCells.size(); ++i) {
+			if (!moldClampedCells[i].hasHit) continue;
+
+			const Point3d rayOrigin =
+				moldClampedCells[i].hitPoint - direction * RAY_EPS;
+
+			const auto rayHits =
+				moldScene.facesIntersectedByRay(
+					rayOrigin,
+					direction,
+					RAY_EPS);
+
+			if (rayHits.empty()) {
+				moldClampedCells[i].hasHit = false;
+				continue;
+			};
+
+			const auto [faceId, baryCoords, triId, hitT] =
+				rayHits.back();
+
+			moldClampedCells[i].hitPoint =
+				computeHitPoint(
+					*mold,
+					faceId,
+					triId,
+					baryCoords,
+					moldClampedCells[i].hitPoint);
+			moldClampedCells[i].distance = hitT;
+		}
+	}
+
+	if (outRemainingMoldMesh != nullptr) {
+		*outRemainingMoldMesh =
+			createRemainingMold(cells, clampedCells, moldClampedCells, grid);
+	}
+
 	
 
 	if (debug) {
@@ -223,8 +265,14 @@ MoldCheckMetrics moldCheck(
 		PolyMesh clampedPointsMesh;
 		clampedPointsMesh.enablePerVertexColor();
 		for (uint i = 0; i < clampedCells.size(); ++i) {
-			if (!clampedCells[i].hasHit) continue;
 			addColoredPoint(clampedPointsMesh, clampedCells[i].hitPoint, Color::Blue);
+		}
+
+		PolyMesh moldClampedPointsMesh;
+		moldClampedPointsMesh.enablePerVertexColor();
+		for (uint i = 0; i < moldClampedCells.size(); ++i) {
+			if (!moldClampedCells[i].hasHit) continue;
+			addColoredPoint(moldClampedPointsMesh, moldClampedCells[i].hitPoint, Color::Cyan);
 		}
 
 		PolyMesh thirdHitPointsMesh;
@@ -232,6 +280,13 @@ MoldCheckMetrics moldCheck(
 		for (uint i = 0; i < cells.size(); ++i) {
 			if (!cells[i].hasHiddenHit) continue;
 			addColoredPoint(thirdHitPointsMesh, cells[i].thirdHitPoint, Color::Magenta);
+		}
+
+		PolyMesh lastHitPointsMesh;
+		lastHitPointsMesh.enablePerVertexColor();
+		for (uint i = 0; i < cells.size(); ++i) {
+			if (!cells[i].hasHit) continue;
+			addColoredPoint(lastHitPointsMesh, cells[i].lastHitPoint, Color::Green);
 		}
 		
 		PolyMesh missedPointsMesh;
@@ -291,7 +346,9 @@ MoldCheckMetrics moldCheck(
 		saveMesh(clampedonlyPointsMesh, base + "_clamped_only_points.ply");
 		saveMesh(clampednohitPointsMesh, base + "_clamped_nohit_points.ply");
 		saveMesh(clampedPointsMesh, base + "_all_clamped_points.ply");
+		saveMesh(moldClampedPointsMesh, base + "_mold_clamped_points.ply");
 		saveMesh(thirdHitPointsMesh, base + "_third_hit_points.ply");
+		saveMesh(lastHitPointsMesh, base + "_last_hit_points.ply");
 		saveMesh(planeMesh, base + "_plane.ply");
 		saveMesh(missedPointsMesh, base + "_missed_points.ply");
 		saveMesh(ClampedPrismMesh, base + "_clamped_prisms.ply");
@@ -302,6 +359,7 @@ MoldCheckMetrics moldCheck(
 		saveMesh(perimeterSegments, base + "_largest_component_perimeter.ply");
 		
 		std::cout << "Clamped points: " << clampedPointsMesh.vertexCount() << "\n";
+		std::cout << "Mold clamped points: " << moldClampedPointsMesh.vertexCount() << "\n";
 		std::cout << "Third hit points: " << thirdHitPointsMesh.vertexCount() << "\n";
 		std::cout << "Mold surface median points: " << moldSurfaceMesh.vertexCount() << "\n";
 		std::cout << "Largest component cells: "
@@ -331,7 +389,9 @@ MoldCheckMetrics moldCheck(
 				<< " - " << base << "_clamped_only_points.ply\n"
 				<< " - " << base << "_clamped_nohit_points.ply\n"
 				<< " - " << base << "_all_clamped_points.ply\n"
+				<< " - " << base << "_mold_clamped_points.ply\n"
 				<< " - " << base << "_third_hit_points.ply\n"
+				<< " - " << base << "_last_hit_points.ply\n"
 				<< " - " << base << "_plane.ply\n"
 				<< " - " << base << "_missed_points.ply\n"
 				<< " - " << base << "_clamped_prisms.ply\n"
@@ -368,6 +428,17 @@ int main()
 
 	const double marginFactor = 0.1;
 
+	PolyMesh mold = squareMold(m, marginFactor);
+	const std::filesystem::path externalResultsPath =
+		VCLIB_EXTERNAL_RESULTS_PATH;
+	std::filesystem::create_directories(externalResultsPath);
+	saveMesh(
+		mold,
+		(externalResultsPath / "mold.ply").string());
+	
+	double moldVolume = squareMoldVolume(m, marginFactor);
+	std::cout << "Mold volume: " << moldVolume << "\n";
+
 	MoldCheckMetrics result;
 	MoldCheckMetrics bestResult;
 	MoldCheckMetrics worstResult;
@@ -395,9 +466,39 @@ int main()
 		}
 	}
 
-	result = moldCheck(m, gridCellSideLengths, true, fibNormals[bestDirectionIndex], coneAngleDegrees, marginFactor, "best");
+	TriMesh bestRemainingMoldMesh;
+	result = moldCheck(
+		m,
+		gridCellSideLengths,
+		true,
+		fibNormals[bestDirectionIndex],
+		coneAngleDegrees,
+		marginFactor,
+		"best",
+		&mold,
+		&bestRemainingMoldMesh);
+	const std::filesystem::path bestRemainingMoldPath =
+		externalResultsPath /
+		"best" / "mold" / "888_mold_check_remaining_mold.ply";
+	std::filesystem::create_directories(bestRemainingMoldPath.parent_path());
+	saveMesh(bestRemainingMoldMesh, bestRemainingMoldPath.string());
 
-	result = moldCheck(m, gridCellSideLengths, true, fibNormals[worstDirectionIndex], coneAngleDegrees, marginFactor, "worst");
+	TriMesh worstRemainingMoldMesh;
+	result = moldCheck(
+		m,
+		gridCellSideLengths,
+		true,
+		fibNormals[worstDirectionIndex],
+		coneAngleDegrees,
+		marginFactor,
+		"worst",
+		&mold,
+		&worstRemainingMoldMesh);
+	const std::filesystem::path worstRemainingMoldPath =
+		externalResultsPath /
+		"worst" / "mold" / "888_mold_check_remaining_mold.ply";
+	std::filesystem::create_directories(worstRemainingMoldPath.parent_path());
+	saveMesh(worstRemainingMoldMesh, worstRemainingMoldPath.string());
 
     const auto endTime = std::chrono::steady_clock::now();
     const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);

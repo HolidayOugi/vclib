@@ -3,9 +3,11 @@
 
 #include "struct.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <iostream>
+#include <string>
 #include <unordered_set>
 #include <vector>
 
@@ -70,6 +72,7 @@ static vcl::TriMesh createMoldSurface(
 	using namespace vcl;
 
 	TriMesh tm;
+	tm.enablePerFaceColor();
 
 	for (uint row = 0; row + 1 < grid.rows; row += 1) {
 		for (uint col = 0; col + 1 < grid.cols; col += 1) {
@@ -128,9 +131,103 @@ static vcl::uint addFaceWithColor(
 	vcl::uint v2,
 	const vcl::Color& faceColor)
 {
+	tm.enablePerFaceColor();
 	const vcl::uint fid = tm.addFace(v0, v1, v2);
 	tm.face(fid).color() = faceColor;
 	return fid;
+}
+
+static vcl::TriMesh createRemainingMold(
+	const std::vector<CellData>& cells,
+	const std::vector<CellData>& clampedCells,
+	const std::vector<CellData>& moldClampedCells,
+	const GridChoice& grid)
+{
+	using namespace vcl;
+
+	TriMesh tm;
+
+	if (moldClampedCells.size() != clampedCells.size()) {
+		return tm;
+	}
+
+	std::vector<int> moldVertexIds(clampedCells.size(), -1);
+	std::vector<int> clampedLastVertexIds(clampedCells.size(), -1);
+	std::vector<int> clampedHitVertexIds(clampedCells.size(), -1);
+	std::vector<int> cellVertexIds(clampedCells.size(), -1);
+
+	for (uint i = 0; i < clampedCells.size(); ++i) {
+		if (moldClampedCells[i].hasHit) {
+			moldVertexIds[i] = tm.addVertex(moldClampedCells[i].hitPoint);
+		}
+
+		if (clampedCells[i].hasHit && moldClampedCells[i].hasHit) {
+			if (cells[i].hasHit) {
+				clampedLastVertexIds[i] = tm.addVertex(clampedCells[i].lastHitPoint);
+			}
+			clampedHitVertexIds[i] = tm.addVertex(clampedCells[i].hitPoint);
+		}
+
+		if (cells[i].hasHit && clampedCells[i].hasHit && moldClampedCells[i].hasHit &&
+			cells[i].hitPoint != clampedCells[i].hitPoint) {
+			cellVertexIds[i] = tm.addVertex(cells[i].hitPoint);
+		}
+	}
+
+	for (uint row = 0; row + 1 < grid.rows; row++) {
+		for (uint col = 0; col + 1 < grid.cols; col++) {
+			uint c00 = row * grid.cols + col;
+			uint c10 = c00 + 1;
+			uint c01 = c00 + grid.cols;
+			uint c11 = c01 + 1;
+
+			if (moldVertexIds[c00] >= 0 && moldVertexIds[c10] >= 0 && 
+				moldVertexIds[c01] >= 0 && moldVertexIds[c11] >= 0) {
+				addFaceWithColor(tm, moldVertexIds[c00], moldVertexIds[c10], moldVertexIds[c11], Color::Red);
+				addFaceWithColor(tm, moldVertexIds[c00], moldVertexIds[c11], moldVertexIds[c01], Color::Red);
+			}
+
+			if (clampedLastVertexIds[c00] >= 0 && clampedLastVertexIds[c10] >= 0 && 
+				clampedLastVertexIds[c01] >= 0 && clampedLastVertexIds[c11] >= 0) {
+				addFaceWithColor(tm, clampedLastVertexIds[c00], clampedLastVertexIds[c11], clampedLastVertexIds[c10], Color::Red);
+				addFaceWithColor(tm, clampedLastVertexIds[c00], clampedLastVertexIds[c01], clampedLastVertexIds[c11], Color::Red);
+			}
+
+			if (moldVertexIds[c00] >= 0 && moldVertexIds[c10] >= 0 && 
+				clampedLastVertexIds[c00] >= 0 && clampedLastVertexIds[c10] >= 0) {
+				addFaceWithColor(tm, moldVertexIds[c00], clampedLastVertexIds[c00], clampedLastVertexIds[c10], Color::Red);
+				addFaceWithColor(tm, moldVertexIds[c00], clampedLastVertexIds[c10], moldVertexIds[c10], Color::Red);
+			} else if (moldVertexIds[c00] >= 0 && moldVertexIds[c10] >= 0 &&
+				clampedHitVertexIds[c00] >= 0 && clampedHitVertexIds[c10] >= 0) {
+				addFaceWithColor(tm, moldVertexIds[c00], clampedHitVertexIds[c00], clampedHitVertexIds[c10], Color::Red);
+				addFaceWithColor(tm, moldVertexIds[c00], clampedHitVertexIds[c10], moldVertexIds[c10], Color::Red);
+			}
+
+			if (moldVertexIds[c00] >= 0 && moldVertexIds[c01] >= 0 && 
+				clampedLastVertexIds[c00] >= 0 && clampedLastVertexIds[c01] >= 0) {
+				addFaceWithColor(tm, moldVertexIds[c00], moldVertexIds[c01], clampedLastVertexIds[c01], Color::Red);
+				addFaceWithColor(tm, moldVertexIds[c00], clampedLastVertexIds[c01], clampedLastVertexIds[c00], Color::Red);
+			} else if (moldVertexIds[c00] >= 0 && moldVertexIds[c01] >= 0 &&
+				clampedHitVertexIds[c00] >= 0 && clampedHitVertexIds[c01] >= 0) {
+				addFaceWithColor(tm, moldVertexIds[c00], moldVertexIds[c01], clampedHitVertexIds[c01], Color::Red);
+				addFaceWithColor(tm, moldVertexIds[c00], clampedHitVertexIds[c01], clampedHitVertexIds[c00], Color::Red);
+			}
+
+			if (clampedHitVertexIds[c00] >= 0 && clampedHitVertexIds[c10] >= 0 &&
+				cellVertexIds[c00] >= 0 && cellVertexIds[c10] >= 0) {
+				addFaceWithColor(tm, clampedHitVertexIds[c00], cellVertexIds[c00], cellVertexIds[c10], Color::Red);
+				addFaceWithColor(tm, clampedHitVertexIds[c00], cellVertexIds[c10], clampedHitVertexIds[c10], Color::Red);
+			}
+
+			if (clampedHitVertexIds[c00] >= 0 && clampedHitVertexIds[c01] >= 0 &&
+				cellVertexIds[c00] >= 0 && cellVertexIds[c01] >= 0) {
+				addFaceWithColor(tm, clampedHitVertexIds[c00], clampedHitVertexIds[c01], cellVertexIds[c01], Color::Red);
+				addFaceWithColor(tm, clampedHitVertexIds[c00], cellVertexIds[c01], cellVertexIds[c00], Color::Red);
+			}
+		}
+	}
+
+	return tm;
 }
 
 static void addQuadPrism(

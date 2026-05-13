@@ -27,6 +27,7 @@ struct CellData
 	double distance;
 	vcl::Point3d hitPoint;
 	vcl::Point3d thirdHitPoint;
+	vcl::Point3d lastHitPoint;
 	bool hasHit = false;
 	bool hasHiddenHit = false;
 };

@@ -4,14 +4,126 @@
 #include "helper.h"
 #include "struct.h"
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
 #include <numeric>
 #include <tuple>
 #include <vector>
 
+#include <vclib/algorithms/mesh/stat/geometry.h>
+#include <vclib/algorithms/mesh/update/bounding_box.h>
 #include <vclib/embree/scene.h>
 #include <vclib/meshes.h>
+
+static std::tuple<vcl::Point3d, vcl::Point3d> expandedBoundingBox(
+	const vcl::PolyMesh& m,
+	double marginFactor)
+{
+	using namespace vcl;
+
+	if (m.vertexCount() == 0) {
+		return {Point3d(), Point3d()};
+	}
+
+	Point3d min = m.vertices().begin()->position();
+	Point3d max = min;
+
+	for (const auto& v : m.vertices()) {
+		const Point3d& p = v.position();
+		for (uint i = 0; i < 3; ++i) {
+			min(i) = std::min(min(i), p(i));
+			max(i) = std::max(max(i), p(i));
+		}
+	}
+
+	const double margin = marginFactor * (max - min).norm();
+	min -= Point3d(margin, margin, margin);
+	max += Point3d(margin, margin, margin);
+
+	return {min, max};
+}
+
+static void addBoxTriangles(
+	vcl::PolyMesh& mold,
+	const vcl::Point3d& min,
+	const vcl::Point3d& max)
+{
+	using namespace vcl;
+
+	const uint v0 = mold.addVertex(Point3d(min.x(), min.y(), min.z()));
+	const uint v1 = mold.addVertex(Point3d(max.x(), min.y(), min.z()));
+	const uint v2 = mold.addVertex(Point3d(min.x(), max.y(), min.z()));
+	const uint v3 = mold.addVertex(Point3d(max.x(), max.y(), min.z()));
+	const uint v4 = mold.addVertex(Point3d(min.x(), min.y(), max.z()));
+	const uint v5 = mold.addVertex(Point3d(max.x(), min.y(), max.z()));
+	const uint v6 = mold.addVertex(Point3d(min.x(), max.y(), max.z()));
+	const uint v7 = mold.addVertex(Point3d(max.x(), max.y(), max.z()));
+
+	mold.addFace(v0, v2, v1);
+	mold.addFace(v3, v1, v2);
+	mold.addFace(v0, v4, v2);
+	mold.addFace(v6, v2, v4);
+	mold.addFace(v0, v1, v4);
+	mold.addFace(v5, v4, v1);
+	mold.addFace(v7, v6, v5);
+	mold.addFace(v4, v5, v6);
+	mold.addFace(v7, v3, v6);
+	mold.addFace(v2, v6, v3);
+	mold.addFace(v7, v5, v3);
+	mold.addFace(v1, v3, v5);
+}
+
+static vcl::PolyMesh squareMold(const vcl::PolyMesh& m, double marginFactor)
+{
+	using namespace vcl;
+
+	if (m.vertexCount() == 0) {
+		return {};
+	}
+
+	const auto [min, max] = expandedBoundingBox(m, marginFactor);
+
+	PolyMesh mold;
+	addBoxTriangles(mold, min, max);
+
+	std::vector<uint> copiedVertexIds(m.vertexContainerSize(), UINT_NULL);
+	for (const auto& v : m.vertices()) {
+		copiedVertexIds[v.index()] = mold.addVertex(v.position());
+	}
+
+	for (const auto& f : m.faces()) {
+		const std::vector<uint> tris = earCut(f);
+
+		for (std::size_t i = 0; i + 2 < tris.size(); i += 3) {
+			const uint v0 = copiedVertexIds[f.vertexIndex(tris[i + 0])];
+			const uint v1 = copiedVertexIds[f.vertexIndex(tris[i + 1])];
+			const uint v2 = copiedVertexIds[f.vertexIndex(tris[i + 2])];
+
+			if (v0 != UINT_NULL && v1 != UINT_NULL && v2 != UINT_NULL) {
+				mold.addFace(v2, v1, v0);
+			}
+		}
+	}
+
+	updateBoundingBox(mold);
+	return mold;
+}
+
+static double squareMoldVolume(const vcl::PolyMesh& m, double marginFactor)
+{
+	using namespace vcl;
+
+	if (m.vertexCount() == 0) {
+		return 0.0;
+	}
+
+	const auto [min, max] = expandedBoundingBox(m, marginFactor);
+	const Point3d boxSize = max - min;
+	const double boxVolume = boxSize.x() * boxSize.y() * boxSize.z();
+
+	return boxVolume - std::abs(volume(m));
+}
 
 static std::tuple<vcl::Point3d, vcl::Point3d> makePlane(
 	const vcl::PolyMesh& m,
@@ -129,18 +241,22 @@ static CellData shootRayOnCell(
 			result.thirdHitPoint = result.hitPoint; //to remove
 			result.hasHit = result.hitPoint != invalidPoint;
 			result.hasHiddenHit = false;
+			result.lastHitPoint = result.hitPoint;
 
 			return result;
 		}
 		
 		auto [faceId, baryCoords, triId, hitT] = rayHits.front(); 
 		Point3d hitPoint = computeHitPoint(m, faceId, triId, baryCoords, invalidPoint);
+		auto [lastFaceId, lastBaryCoords, lastTriId, lastHitT] = rayHits.back();
+		Point3d lastHitPoint = computeHitPoint(m, lastFaceId, lastTriId, lastBaryCoords, invalidPoint);
 
 		if (hitPoint != invalidPoint) {
 			CellData result = cell;
 			result.distance = hitT;
 			result.hitPoint = hitPoint;
 			result.thirdHitPoint = hitPoint; //to remove
+			result.lastHitPoint = lastHitPoint;
 			result.hasHit = true;
 			result.hasHiddenHit = rayHits.size() > 2;
 				
@@ -163,6 +279,7 @@ static CellData shootRayOnCell(
 	result.distance = maxDistance;
 	result.hitPoint = invalidPoint;
 	result.thirdHitPoint = invalidPoint;
+	result.lastHitPoint = invalidPoint;
 	result.hasHit = false;
 	result.hasHiddenHit = false;
 
@@ -205,6 +322,7 @@ static CellData makeCellGeometry(
 	cell.thirdHitPoint = cell.cellCenter;
 	cell.hasHit = false;
 	cell.hasHiddenHit = false;
+	cell.lastHitPoint = cell.cellCenter;
 
 	return cell;
 }
@@ -267,6 +385,7 @@ static CellData computeClampedCell(
 		distanceToPlane,
 		currentPoint,
 		baseCell.thirdHitPoint,
+		baseCell.lastHitPoint,
 		true,
 		baseCell.hasHiddenHit};
 }
